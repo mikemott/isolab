@@ -1,0 +1,59 @@
+# ── Isolab .bashrc ─────────────────────────────────────
+
+[[ $- != *i* ]] && return
+
+# ── Environment ────────────────────────────────────────
+export EDITOR=vim
+export VISUAL=vim
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH"
+
+# History
+export HISTSIZE=50000
+export HISTFILESIZE=100000
+export HISTCONTROL=ignoreboth:erasedups
+export HISTTIMEFORMAT="%Y-%m-%d %H:%M:%S  "
+shopt -s histappend
+
+# ── Starship prompt ────────────────────────────────────
+eval "$(starship init bash)"
+
+# ── direnv ─────────────────────────────────────────────
+eval "$(direnv hook bash)"
+
+# ── Aliases ────────────────────────────────────────────
+alias ll='ls -alFh --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias gs='git status'
+alias gd='git diff'
+alias gl='git log --oneline -20'
+alias grep='grep --color=auto'
+
+if command -v batcat &>/dev/null; then
+    alias cat='batcat --style=plain --paging=never'
+fi
+
+if command -v fdfind &>/dev/null; then
+    alias fd='fdfind'
+fi
+
+# Isolab helpers
+alias netcheck='curl -s --max-time 3 https://example.com > /dev/null 2>&1 && echo "NETWORK: UP" || echo "NETWORK: BLOCKED (isolated mode)"'
+alias logs='ls -lt ~/logs/ | head -20'
+alias lastlog='tail -f ~/logs/$(ls -t ~/logs/ | head -1)'
+
+# ── tmux auto-attach ──────────────────────────────────
+# On SSH login, attach to existing session or create one.
+# This is the core of session persistence — disconnect
+# and reconnect without losing state.
+if [ -n "$SSH_CONNECTION" ] && [ -z "$TMUX" ]; then
+    LAB_NAME=$(cat ~/.isolab-name 2>/dev/null || echo "isolab")
+
+    if tmux has-session -t "$LAB_NAME" 2>/dev/null; then
+        exec tmux attach-session -t "$LAB_NAME"
+    else
+        exec tmux new-session -s "$LAB_NAME" -c ~/workspace
+    fi
+fi
