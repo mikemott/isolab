@@ -1,0 +1,14 @@
+language: en
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+  path_instructions:
+    - path: "setup.sh"
+      instructions: "Pure bash TUI wizard. No external dependencies. Focus on terminal safety (stty restore, trap handlers), correct escape sequence handling, and shellcheck compliance."
+    - path: "scripts/**"
+      instructions: "Network and iptables rules. Focus on security implications and idempotency."
+    - path: "image/**"
+      instructions: "Docker container config. Focus on security hardening and minimal attack surface."
+    - path: "dashboard/**"
+      instructions: "Flask web UI. Focus on injection vulnerabilities and auth."
