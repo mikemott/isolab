@@ -797,7 +797,8 @@ step_system_packages() {
         return 0
     fi
     sudo apt-get update -qq
-    sudo apt-get install -y -qq "${missing[@]}"
+    # Suppress needrestart interactive prompts
+    sudo NEEDRESTART_MODE=a apt-get install -y -qq "${missing[@]}"
 }
 
 step_hardening_packages() {
@@ -809,12 +810,12 @@ step_hardening_packages() {
         fi
     done
     if [ ${#missing[@]} -eq 0 ]; then return 0; fi
-    sudo apt-get install -y -qq "${missing[@]}"
+    sudo NEEDRESTART_MODE=a apt-get install -y -qq "${missing[@]}"
 }
 
 step_system_update() {
     sudo apt-get update -qq
-    sudo apt-get upgrade -y -qq
+    sudo NEEDRESTART_MODE=a DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -qq
 }
 
 step_configure_ufw() {
@@ -870,7 +871,7 @@ step_install_tailscale() {
 
 step_unattended_upgrades() {
     if dpkg -s unattended-upgrades &>/dev/null 2>&1; then return 0; fi
-    sudo apt-get install -y -qq unattended-upgrades
+    sudo NEEDRESTART_MODE=a apt-get install -y -qq unattended-upgrades
     echo 'Unattended-Upgrade::Automatic-Reboot "false";' | \
         sudo tee /etc/apt/apt.conf.d/51isolab-unattended > /dev/null
 }
@@ -919,7 +920,7 @@ step_install_gvisor() {
 
     echo "Installing runsc..."
     sudo apt-get update -qq
-    if ! sudo apt-get install -y -qq runsc; then
+    if ! sudo NEEDRESTART_MODE=a apt-get install -y -qq runsc; then
         echo "ERROR: Failed to install runsc"
         return 1
     fi
@@ -937,17 +938,23 @@ step_build_image() {
         return 0
     fi
 
-    # Check Docker access
+    # Check Docker access - try with sg if needed
     if ! docker info &>/dev/null 2>&1; then
-        echo ""
-        echo "ERROR: Cannot access Docker daemon"
-        echo ""
-        echo "This usually means you need to:"
-        echo "  1. Log out and back in (for docker group to take effect)"
-        echo "  2. Or run: newgrp docker"
-        echo ""
-        echo "After that, re-run setup.sh"
-        return 1
+        # If Docker was just installed, try using sg to run with docker group
+        if groups | grep -q docker && [ "$NEEDS_RELOGIN" = true ]; then
+            echo "Using sg to access Docker (group membership not yet active in this shell)"
+            sg docker -c "docker build -t isolab:latest '${SCRIPT_DIR}/image'"
+            return $?
+        else
+            echo ""
+            echo "ERROR: Cannot access Docker daemon"
+            echo ""
+            echo "This usually means you need to:"
+            echo "  1. Log out and back in (for docker group to take effect)"
+            echo "  2. Then re-run: ./setup.sh"
+            echo ""
+            return 1
+        fi
     fi
 
     # Build with progress output
@@ -955,16 +962,23 @@ step_build_image() {
 }
 
 step_setup_networks() {
-    # Check Docker access first
+    # Check Docker access - try with sg if needed
     if ! docker info &>/dev/null 2>&1; then
-        echo ""
-        echo "ERROR: Cannot access Docker daemon"
-        echo ""
-        echo "This usually means you need to:"
-        echo "  1. Log out and back in (for docker group to take effect)"
-        echo "  2. Or run: newgrp docker"
-        echo ""
-        return 1
+        # If Docker was just installed, try using sg to run with docker group
+        if groups | grep -q docker && [ "$NEEDS_RELOGIN" = true ]; then
+            echo "Using sg to access Docker (group membership not yet active in this shell)"
+            sg docker -c "bash '${SCRIPT_DIR}/scripts/setup-networks.sh'"
+            return $?
+        else
+            echo ""
+            echo "ERROR: Cannot access Docker daemon"
+            echo ""
+            echo "This usually means you need to:"
+            echo "  1. Log out and back in (for docker group to take effect)"
+            echo "  2. Then re-run: ./setup.sh"
+            echo ""
+            return 1
+        fi
     fi
 
     # Run network setup script
