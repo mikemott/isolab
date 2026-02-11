@@ -61,6 +61,15 @@ For non-interactive use (CI, piped input), pass `--auto` for Quick Setup default
 
 The script is idempotent — safe to run multiple times. Quick Setup installs Docker, gVisor, builds the container image, configures the restricted network, and installs the CLI. Full Setup adds system hardening, UFW firewall, SSH hardening, Tailscale, and automatic security updates.
 
+**Tailscale Setup:** If you select Tailscale during Full Setup, you can provide an auth key to automate authentication:
+
+```bash
+export TAILSCALE_AUTHKEY="tskey-auth-xxxxx"
+./setup.sh
+```
+
+Generate auth keys at https://login.tailscale.com/admin/settings/keys. Without an auth key, setup will install Tailscale but skip authentication — you'll need to run `sudo tailscale up --ssh` manually after setup completes.
+
 ### 3. Create your first sandbox
 
 ```bash

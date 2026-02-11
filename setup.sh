@@ -33,6 +33,7 @@ declare -a OPTION_LABELS=()
 declare -a OPTION_DEFAULTS=()
 declare -a OPTION_KEYS=()
 NEEDS_RELOGIN=false
+NEEDS_TAILSCALE_AUTH=false
 
 # ── Terminal Helpers ────────────────────────────────────
 
@@ -782,9 +783,32 @@ step_harden_ssh() {
 }
 
 step_install_tailscale() {
-    if command -v tailscale &>/dev/null; then return 0; fi
-    curl -fsSL https://tailscale.com/install.sh | sh
-    sudo tailscale up --ssh
+    # Check if tailscale is installed AND authenticated
+    if command -v tailscale &>/dev/null; then
+        if sudo tailscale status &>/dev/null 2>&1; then
+            # Already authenticated, just ensure UFW allows it
+            if command -v ufw &>/dev/null && sudo ufw status | grep -q "Status: active"; then
+                sudo ufw allow in on tailscale0 2>/dev/null || true
+            fi
+            return 0
+        fi
+    fi
+
+    # Install tailscale if not present
+    if ! command -v tailscale &>/dev/null; then
+        curl -fsSL https://tailscale.com/install.sh | sh
+    fi
+
+    # Authenticate using authkey if provided, otherwise skip
+    if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
+        sudo tailscale up --ssh --authkey="${TAILSCALE_AUTHKEY}"
+    else
+        # Mark that we need manual tailscale auth
+        NEEDS_TAILSCALE_AUTH=true
+        return 0  # Don't fail, just skip authentication
+    fi
+
+    # Configure firewall
     if command -v ufw &>/dev/null && sudo ufw status | grep -q "Status: active"; then
         sudo ufw allow in on tailscale0
     fi
@@ -998,6 +1022,14 @@ screen_summary() {
         draw_box_line "$w" "${RED}⚠  Action required:${NC}"
         draw_box_line "$w" "  Log out and back in for Docker"
         draw_box_line "$w" "  group access to take effect."
+        draw_box_empty "$w"
+    fi
+
+    if [ "$NEEDS_TAILSCALE_AUTH" = true ]; then
+        draw_box_separator "$w"
+        draw_box_line "$w" "${AMBER}⚠  Tailscale authentication needed:${NC}"
+        draw_box_line "$w" "  ${WHITE}sudo tailscale up --ssh${NC}"
+        draw_box_line "$w" "  Then visit the URL shown to authenticate."
         draw_box_empty "$w"
     fi
 

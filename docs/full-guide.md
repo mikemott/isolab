@@ -80,6 +80,16 @@ sudo tailscale up --ssh
 tailscale status
 ```
 
+The `tailscale up --ssh` command will print an authentication URL. Visit it in your browser to authenticate.
+
+**For automated setup with auth key:**
+```bash
+export TAILSCALE_AUTHKEY="tskey-auth-xxxxx"
+sudo tailscale up --ssh --authkey="${TAILSCALE_AUTHKEY}"
+```
+
+Generate auth keys at https://login.tailscale.com/admin/settings/keys.
+
 Now SSH from your main machine: `ssh user@isolab-host`
 
 ---
