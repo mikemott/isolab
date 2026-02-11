@@ -940,8 +940,9 @@ step_build_image() {
 
     # Check Docker access - try with sg if needed
     if ! docker info &>/dev/null 2>&1; then
-        # If Docker was just installed, try using sg to run with docker group
-        if groups | grep -q docker && [ "$NEEDS_RELOGIN" = true ]; then
+        # If Docker was just installed, use sg to access docker group
+        # (usermod added us to the group but current shell doesn't see it yet)
+        if [ "$NEEDS_RELOGIN" = true ]; then
             echo "Using sg to access Docker (group membership not yet active in this shell)"
             sg docker -c "docker build -t isolab:latest '${SCRIPT_DIR}/image'"
             return $?
@@ -964,8 +965,9 @@ step_build_image() {
 step_setup_networks() {
     # Check Docker access - try with sg if needed
     if ! docker info &>/dev/null 2>&1; then
-        # If Docker was just installed, try using sg to run with docker group
-        if groups | grep -q docker && [ "$NEEDS_RELOGIN" = true ]; then
+        # If Docker was just installed, use sg to access docker group
+        # (usermod added us to the group but current shell doesn't see it yet)
+        if [ "$NEEDS_RELOGIN" = true ]; then
             echo "Using sg to access Docker (group membership not yet active in this shell)"
             sg docker -c "bash '${SCRIPT_DIR}/scripts/setup-networks.sh'"
             return $?
