@@ -96,8 +96,12 @@ draw_box() {
     # Top border
     echo -n "  ╭"
     if [ -n "$title" ]; then
-        local tlen=${#title}
+        # Strip ANSI codes to get actual visible length
+        local stripped
+        stripped=$(echo -e "$title" | sed 's/\x1b\[[0-9;]*m//g')
+        local tlen=${#stripped}
         local padding=$((width - tlen - 4))
+        if [ "$padding" -lt 0 ]; then padding=0; fi
         echo -n "─ ${NC}${AMBER}${BOLD}${title}${NC}${color} "
         printf '─%.0s' $(seq 1 "$padding")
     else
@@ -245,14 +249,17 @@ select_menu() {
         esac
 
         # Move cursor up to redraw
-        local lines_to_clear=3  # prompt + empty + footer
+        # Count: empty + prompt + empty + options + empty + footer = 5 base lines
+        local lines_to_clear=5
         for i in $(seq 0 $((count - 1))); do
             lines_to_clear=$((lines_to_clear + 1))
             if [ -n "${descs[$i]:-}" ]; then
                 lines_to_clear=$((lines_to_clear + 1))
             fi
         done
-        printf '\033[%dA\033[J' "$lines_to_clear"
+        # Move cursor up and clear to end of screen
+        printf '\033[%dA' "$lines_to_clear"
+        printf '\033[J'
     done
 }
 
@@ -326,8 +333,10 @@ checkbox_menu() {
         esac
 
         # Move cursor up to redraw
-        local lines_to_clear=$((count + 4))
-        printf '\033[%dA\033[J' "$lines_to_clear"
+        # Count: empty + prompt + empty + options + empty + footer
+        local lines_to_clear=$((count + 5))
+        printf '\033[%dA' "$lines_to_clear"
+        printf '\033[J'
     done
 }
 
@@ -711,6 +720,51 @@ run_step() {
     return "$exit_code"
 }
 
+# Run step with live output (for long operations like docker build)
+run_step_verbose() {
+    local label="$1"
+    shift
+    local cmd="$*"
+    local description="${STEP_DESCRIPTIONS[$label]:-}"
+
+    echo ""
+    echo -e "  ${AMBER}${BOLD}${label}${NC}"
+    if [ -n "$description" ]; then
+        echo -e "  ${DIM}${description}${NC}"
+    fi
+    echo ""
+
+    local exit_code=0
+    # Show output but also log it
+    eval "$cmd" 2>&1 | tee -a /tmp/isolab-setup.log || exit_code=$?
+
+    echo ""
+    if [ "$exit_code" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} ${label}"
+    else
+        echo -e "  ${RED}✗${NC} ${label} (exit code: ${exit_code})"
+        echo -e "  ${DIM}Check /tmp/isolab-setup.log for details${NC}"
+    fi
+    return "$exit_code"
+}
+
+# Declare associative array for step descriptions
+declare -A STEP_DESCRIPTIONS=(
+    ["System packages"]="Installing curl, wget, git, jq"
+    ["Hardening packages"]="Installing security tools (ufw, unattended-upgrades)"
+    ["System update"]="Running apt upgrade (this may take a while)"
+    ["UFW firewall"]="Configuring firewall: deny incoming, allow SSH"
+    ["SSH hardening"]="Disabling password authentication"
+    ["Tailscale"]="Installing Tailscale for secure remote access"
+    ["Automatic security updates"]="Enabling unattended-upgrades"
+    ["Docker"]="Installing Docker engine and adding user to docker group"
+    ["gVisor"]="Installing gVisor (runsc) for enhanced container isolation"
+    ["Build Isolab image"]="Building container image with dev tools (Python, Node.js, etc). This takes 3-5 minutes..."
+    ["Restricted network"]="Creating Docker network with iptables rules for package-only access"
+    ["Install CLI"]="Symlinking isolab command to /usr/local/bin"
+    ["Web dashboard"]="Installing Flask and Docker Python packages"
+)
+
 do_preflight() {
     # Root check
     if [ "$(id -u)" -eq 0 ]; then
@@ -824,44 +878,97 @@ step_unattended_upgrades() {
 step_install_docker() {
     if command -v docker &>/dev/null; then
         if ! docker info &>/dev/null 2>&1; then
+            echo "Docker is installed but not accessible. Adding user to docker group..."
             sudo usermod -aG docker "$USER"
             NEEDS_RELOGIN=true
+        else
+            echo "Docker is already installed and accessible"
         fi
         return 0
     fi
-    curl -fsSL https://get.docker.com | sh
+
+    echo "Installing Docker from get.docker.com..."
+    if ! curl -fsSL https://get.docker.com | sh; then
+        echo ""
+        echo "ERROR: Docker installation failed"
+        echo "Check your internet connection and try again"
+        return 1
+    fi
+
+    echo "Adding user to docker group..."
     sudo usermod -aG docker "$USER"
     NEEDS_RELOGIN=true
+    echo "Docker installed successfully"
 }
 
 step_install_gvisor() {
     if command -v runsc &>/dev/null && docker info 2>/dev/null | grep -q runsc; then
+        echo "gVisor (runsc) is already installed and configured"
         return 0
     fi
-    curl -fsSL https://gvisor.dev/archive.key | \
-        sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+
+    echo "Adding gVisor repository..."
+    if ! curl -fsSL https://gvisor.dev/archive.key | \
+        sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg; then
+        echo "ERROR: Failed to download gVisor GPG key"
+        return 1
+    fi
+
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | \
         sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+
+    echo "Installing runsc..."
     sudo apt-get update -qq
-    sudo apt-get install -y -qq runsc
+    if ! sudo apt-get install -y -qq runsc; then
+        echo "ERROR: Failed to install runsc"
+        return 1
+    fi
+
+    echo "Configuring Docker to use gVisor runtime..."
     sudo runsc install
     sudo systemctl restart docker
+    echo "gVisor installed and configured successfully"
 }
 
 step_build_image() {
+    # Check if image already exists
+    if docker image inspect isolab:latest &>/dev/null 2>&1; then
+        echo "Image already exists, skipping build"
+        return 0
+    fi
+
+    # Check Docker access
     if ! docker info &>/dev/null 2>&1; then
-        echo "Cannot access Docker — may need re-login" >&2
+        echo ""
+        echo "ERROR: Cannot access Docker daemon"
+        echo ""
+        echo "This usually means you need to:"
+        echo "  1. Log out and back in (for docker group to take effect)"
+        echo "  2. Or run: newgrp docker"
+        echo ""
+        echo "After that, re-run setup.sh"
         return 1
     fi
+
+    # Build with progress output
     docker build -t isolab:latest "${SCRIPT_DIR}/image"
 }
 
 step_setup_networks() {
+    # Check Docker access first
     if ! docker info &>/dev/null 2>&1; then
-        echo "Cannot access Docker — skipping" >&2
+        echo ""
+        echo "ERROR: Cannot access Docker daemon"
+        echo ""
+        echo "This usually means you need to:"
+        echo "  1. Log out and back in (for docker group to take effect)"
+        echo "  2. Or run: newgrp docker"
+        echo ""
         return 1
     fi
-    sudo bash "${SCRIPT_DIR}/scripts/setup-networks.sh"
+
+    # Run network setup script
+    bash "${SCRIPT_DIR}/scripts/setup-networks.sh"
 }
 
 step_install_cli() {
@@ -952,14 +1059,39 @@ screen_install() {
     # -- Always: gVisor
     run_step "$(progress_label "gVisor")" step_install_gvisor || errors=$((errors + 1))
 
-    # -- Optional: build image
+    # -- Optional: build image (verbose mode - shows docker build output)
     if is_selected "build_image"; then
-        run_step "$(progress_label "Build Isolab image")" step_build_image || errors=$((errors + 1))
+        step_num=$((step_num + 1))
+        echo ""
+        echo -e "  ${DIM}[${step_num}/${total_steps}]${NC} ${AMBER}${BOLD}Build Isolab image${NC}"
+        echo -e "  ${DIM}Building container image with dev tools (Python, Node.js, etc).${NC}"
+        echo -e "  ${DIM}This takes 3-5 minutes and will show build progress...${NC}"
+        echo ""
+        if step_build_image 2>&1 | tee -a /tmp/isolab-setup.log; then
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Build Isolab image"
+        else
+            echo ""
+            echo -e "  ${RED}✗${NC} Build Isolab image"
+            errors=$((errors + 1))
+        fi
     fi
 
-    # -- Optional: setup network
+    # -- Optional: setup network (verbose mode - shows iptables output)
     if is_selected "setup_network"; then
-        run_step "$(progress_label "Restricted network")" step_setup_networks || errors=$((errors + 1))
+        step_num=$((step_num + 1))
+        echo ""
+        echo -e "  ${DIM}[${step_num}/${total_steps}]${NC} ${AMBER}${BOLD}Restricted network${NC}"
+        echo -e "  ${DIM}Creating Docker network with iptables rules for package-only access${NC}"
+        echo ""
+        if step_setup_networks 2>&1 | tee -a /tmp/isolab-setup.log; then
+            echo ""
+            echo -e "  ${GREEN}✓${NC} Restricted network"
+        else
+            echo ""
+            echo -e "  ${RED}✗${NC} Restricted network"
+            errors=$((errors + 1))
+        fi
     fi
 
     # -- Optional: CLI
