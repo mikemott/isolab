@@ -102,6 +102,32 @@ isolab nuke                                        Destroy ALL sandboxes
 | **Packages** | `--net=packages` | Ports 80/443/53 only | Installing dependencies |
 | **Full** | `--net=full` | Unrestricted | Web scraping, API calls |
 
+### Web Dashboard
+
+If you enabled the dashboard during setup, it runs automatically at **http://localhost:8080** (or via Tailscale at `http://your-hostname:8080`).
+
+The dashboard provides:
+- Create/start/stop/delete labs with a GUI
+- View CPU, memory, and disk usage
+- See all SSH connection info
+- One-click access to container logs
+
+**Manage the dashboard service:**
+```bash
+sudo systemctl status isolab-dashboard   # Check status
+sudo systemctl restart isolab-dashboard  # Restart
+sudo systemctl stop isolab-dashboard     # Stop
+sudo systemctl disable isolab-dashboard  # Disable auto-start
+```
+
+**Manual start** (if not using systemd):
+```bash
+cd ~/isolab/dashboard
+python3 app.py
+```
+
+**Security note**: The dashboard has no authentication. Only expose it via Tailscale or localhost—never directly to the internet.
+
 ### Tips
 
 - **Default to `--net=none`** and only escalate when you need to install packages

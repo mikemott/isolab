@@ -997,7 +997,40 @@ step_install_cli() {
 }
 
 step_install_dashboard() {
-    pip install flask docker --break-system-packages 2>/dev/null || pip install flask docker
+    # Install dependencies
+    echo "Installing Flask and Docker Python packages..."
+    if ! pip install flask docker --break-system-packages 2>/dev/null; then
+        pip install flask docker
+    fi
+
+    # Create systemd service
+    echo "Creating systemd service for dashboard..."
+    sudo tee /etc/systemd/system/isolab-dashboard.service > /dev/null << EOF
+[Unit]
+Description=Isolab Dashboard
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=${SCRIPT_DIR}/dashboard
+ExecStart=/usr/bin/python3 ${SCRIPT_DIR}/dashboard/app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Enable and start the service
+    echo "Enabling and starting dashboard service..."
+    sudo systemctl daemon-reload
+    sudo systemctl enable isolab-dashboard
+    sudo systemctl start isolab-dashboard
+
+    echo "Dashboard started at http://0.0.0.0:8080"
 }
 
 # ── Installation Screen ────────────────────────────────
@@ -1164,6 +1197,20 @@ screen_summary() {
     draw_box_line "$w" "  ${AMBER}isolab ssh myproject${NC}"
     draw_box_line "$w" "  ${AMBER}isolab rm myproject${NC}"
     draw_box_empty "$w"
+
+    # Show dashboard info if installed
+    if is_selected "dashboard"; then
+        draw_box_separator "$w"
+        draw_box_line "$w" "${GREEN}✓  Dashboard running:${NC}"
+        draw_box_line "$w" "  ${WHITE}http://localhost:8080${NC}"
+        if command -v tailscale &>/dev/null && sudo tailscale status &>/dev/null 2>&1; then
+            local ts_hostname
+            ts_hostname=$(hostname)
+            draw_box_line "$w" "  ${WHITE}http://${ts_hostname}:8080${NC} (Tailscale)"
+        fi
+        draw_box_line "$w" "  ${DIM}Manage via: sudo systemctl status isolab-dashboard${NC}"
+        draw_box_empty "$w"
+    fi
 
     if [ "$NEEDS_RELOGIN" = true ]; then
         draw_box_separator "$w"
