@@ -44,6 +44,16 @@ cmd_create() {
     local ssh_pub_key
     ssh_pub_key=$(cat "$SSH_KEY_FILE")
 
+    # Get Tailscale IP (bind to Tailscale interface for secure remote access)
+    local bind_ip="127.0.0.1"
+    if command -v tailscale &>/dev/null; then
+        local ts_ip
+        ts_ip=$(tailscale ip -4 2>/dev/null | head -1)
+        if [ -n "$ts_ip" ]; then
+            bind_ip="$ts_ip"
+        fi
+    fi
+
     # Find available port
     local port=$SSH_BASE_PORT
     while ss -tlnp | grep -q ":${port} "; do
@@ -74,6 +84,9 @@ cmd_create() {
 
     echo "isolab: creating '${name}'..."
     echo "  Network: ${net_display}"
+    if [ "$bind_ip" != "127.0.0.1" ]; then
+        echo "  Binding: ${bind_ip} (Tailscale)"
+    fi
 
     docker run -d \
         --name "${container_name}" \
@@ -81,7 +94,7 @@ cmd_create() {
         --hostname "${name}" \
         --memory=4g \
         --cpus=2 \
-        -p "127.0.0.1:${port}:22" \
+        -p "${bind_ip}:${port}:22" \
         -e SSH_PUBLIC_KEY="$ssh_pub_key" \
         -e ISOLAB_NET_MODE="$net_display" \
         ${docker_net_args} \
@@ -96,8 +109,12 @@ cmd_create() {
     echo "  Logs:    ~/logs/ inside container"
     echo ""
     echo "Connect:"
-    echo "  ssh -p ${port} sandbox@localhost"
-    echo "  ssh -p ${port} sandbox@$(hostname)"
+    if [ "$bind_ip" != "127.0.0.1" ]; then
+        echo "  ssh -p ${port} sandbox@${bind_ip}"
+    else
+        echo "  ssh -p ${port} sandbox@localhost"
+        echo "  ssh -p ${port} sandbox@$(hostname)"
+    fi
 }
 
 cmd_list() {

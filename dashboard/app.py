@@ -5,6 +5,7 @@ for disposable LLM development containers.
 """
 
 import os
+import subprocess
 from datetime import datetime
 
 from flask import Flask, render_template_string, jsonify, request
@@ -20,6 +21,24 @@ SSH_KEY_FILE = os.environ.get(
     "SSH_KEY_FILE", os.path.expanduser("~/.ssh/id_ed25519.pub")
 )
 SSH_BASE_PORT = 2200
+
+
+def get_bind_ip():
+    """Get Tailscale IP for binding, fall back to localhost."""
+    try:
+        result = subprocess.run(
+            ["tailscale", "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            ts_ip = result.stdout.strip().split("\n")[0]
+            if ts_ip:
+                return ts_ip
+    except Exception:
+        pass
+    return "127.0.0.1"
 
 
 def get_sandboxes():
@@ -189,6 +208,8 @@ def api_create():
         net, "ISOLATED"
     )
 
+    bind_ip = get_bind_ip()
+
     try:
         client.containers.run(
             ISOLAB_IMAGE,
@@ -198,7 +219,7 @@ def api_create():
             hostname=name,
             mem_limit="4g",
             nano_cpus=2_000_000_000,
-            ports={"22/tcp": ("127.0.0.1", port)},
+            ports={"22/tcp": (bind_ip, port)},
             environment={
                 "SSH_PUBLIC_KEY": ssh_key,
                 "ISOLAB_NET_MODE": net_display,
