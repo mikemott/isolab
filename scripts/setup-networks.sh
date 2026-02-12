@@ -7,6 +7,7 @@
 set -euo pipefail
 
 NETWORK_NAME="isolab-packages"
+ISOLAB_COMMENT="isolab-packages-rule"
 
 # Check if Docker is accessible
 if ! docker info &>/dev/null 2>&1; then
@@ -38,25 +39,31 @@ echo "✓ Bridge interface: $BRIDGE_IF"
 echo ""
 echo "Configuring iptables rules..."
 
-# Flush existing rules for this bridge
-sudo iptables -F DOCKER-USER 2>/dev/null || true
+# Remove only Isolab's rules (identified by comment), leave others intact
+sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "--comment ${ISOLAB_COMMENT}" | while read -r rule; do
+    # Convert -A to -D for deletion
+    sudo iptables ${rule/-A/-D} 2>/dev/null || true
+done
+
+# Add rules with comment tag for safe idempotent cleanup
+# Order matters: append in sequence so ESTABLISHED is checked first, DROP is last
 
 # Allow established connections
-sudo iptables -I DOCKER-USER -i "$BRIDGE_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
 
 # Allow DNS
-sudo iptables -I DOCKER-USER -i "$BRIDGE_IF" -p udp --dport 53 -j ACCEPT
-sudo iptables -I DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 53 -j ACCEPT
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -p udp --dport 53 -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 53 -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
 
 # Allow HTTPS (443) and HTTP (80)
-sudo iptables -I DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 443 -j ACCEPT
-sudo iptables -I DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 80 -j ACCEPT
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 443 -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -p tcp --dport 80 -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
 
-# Block everything else
-sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -j DROP
+# Block everything else from this bridge
+sudo iptables -A DOCKER-USER -i "$BRIDGE_IF" -m comment --comment "$ISOLAB_COMMENT" -j DROP
 
 # Allow return traffic
-sudo iptables -A DOCKER-USER -o "$BRIDGE_IF" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A DOCKER-USER -o "$BRIDGE_IF" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$ISOLAB_COMMENT" -j ACCEPT
 
 echo "✓ Configured iptables rules"
 echo ""
