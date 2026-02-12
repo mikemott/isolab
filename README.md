@@ -1,8 +1,14 @@
-# Isolab
+<p align="center">
+  <img src="assets/flask.svg" alt="Isolab" width="80" height="80">
+</p>
 
-**Disposable, sandboxed development environments for LLM agent work.**
+<h1 align="center">Isolab</h1>
 
-Isolab lets you spin up isolated Linux containers on your own hardware so AI coding agents (Claude Code, Aider, Cursor, etc.) can run freely without risking your local machine. Default to zero network access. Tear it down when you're done. Nothing escapes.
+<p align="center"><strong>Disposable, sandboxed development environments for LLM agent work.</strong></p>
+
+<p align="center">
+  Isolab lets you spin up isolated Linux containers on your own hardware so AI coding agents (Claude Code, Aider, Cursor, etc.) can run freely without risking your local machine. Default to zero network access. Tear it down when you're done. Nothing escapes.
+</p>
 
 ```
 isolab create myproject              # fully isolated, no network
@@ -23,6 +29,8 @@ LLM coding agents run arbitrary code with your user permissions. One prompt inje
 
 - **gVisor isolation** — every container runs under `runsc`, intercepting all syscalls at the kernel boundary
 - **Three network modes** — `none` (default, zero network), `packages` (pypi/npm/github only), `full` (unrestricted)
+- **SSH proxy** — SSH to port 2222 and a container is auto-provisioned for you, no `create` step needed
+- **Multi-key SSH management** — add keys from multiple machines with `isolab keys add`, sync to all running labs
 - **tmux session persistence** — SSH drops you into a named tmux session; disconnect and reconnect without losing state
 - **Session logging** — all terminal output captured to `~/logs/` automatically
 - **Retro dashboard** — web UI for managing containers, viewing host stats, one-click create/stop/delete
@@ -46,7 +54,7 @@ Flash Ubuntu Server 24.04 to your spare machine. Enable OpenSSH during install.
 ### 2. Clone and run setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/isolab.git
+git clone https://github.com/mikemott/isolab.git
 cd isolab
 ./setup.sh
 ```
@@ -70,7 +78,15 @@ export TAILSCALE_AUTHKEY="tskey-auth-xxxxx"
 
 Generate auth keys at https://login.tailscale.com/admin/settings/keys. Without an auth key, setup will install Tailscale but skip authentication — you'll need to run `sudo tailscale up --ssh` manually after setup completes.
 
-### 3. Create your first sandbox
+### 3. Add your SSH keys
+
+```bash
+isolab keys add ~/.ssh/id_ed25519.pub                    # local key
+isolab keys add "ssh-ed25519 AAAA... user@remote-mac"    # paste a remote key
+isolab keys list                                          # see configured keys
+```
+
+### 4. Create your first sandbox
 
 ```bash
 isolab create test --net=none
@@ -78,6 +94,15 @@ isolab ssh test
 ```
 
 You'll land in a tmux session inside an isolated container. Run `netcheck` to confirm network is blocked.
+
+### 5. Or just SSH in (auto-provision)
+
+If you installed the SSH proxy, containers are created on demand:
+
+```bash
+ssh -p 2222 mike@your-isolab-host            # auto-creates a lab
+ssh -p 2222 mike@your-isolab-host myproject   # creates/connects to "myproject"
+```
 
 For a detailed manual walkthrough, see [docs/full-guide.md](docs/full-guide.md).
 
@@ -92,6 +117,11 @@ isolab start <name>                                Start a stopped sandbox
 isolab rm <name>                                   Remove permanently
 isolab logs <name>                                 View session logs
 isolab nuke                                        Destroy ALL sandboxes
+isolab keys add <key|file>                         Add an SSH public key
+isolab keys list                                   List configured keys
+isolab keys rm <index>                             Remove a key by index
+isolab keys sync [name]                            Push keys to running labs
+isolab install-proxy                               Install SSH proxy (port 2222)
 ```
 
 ### Network Modes
@@ -101,6 +131,21 @@ isolab nuke                                        Destroy ALL sandboxes
 | **Isolated** | `--net=none` (default) | No network at all | Safe agent execution, code review |
 | **Packages** | `--net=packages` | Ports 80/443/53 only | Installing dependencies |
 | **Full** | `--net=full` | Unrestricted | Web scraping, API calls |
+
+### SSH Proxy
+
+The SSH proxy listens on port 2222 and auto-provisions containers when users connect. Install it with:
+
+```bash
+sudo isolab install-proxy
+```
+
+Each connecting SSH key is mapped to its own container. Pass a name as the SSH command to target a specific lab:
+
+```bash
+ssh -p 2222 mike@isolab-host              # auto-assigned name from key fingerprint
+ssh -p 2222 mike@isolab-host myproject    # creates/connects to "myproject"
+```
 
 ### Web Dashboard
 
@@ -112,21 +157,19 @@ The dashboard provides:
 - See all SSH connection info
 - One-click access to container logs
 
+**Install the dashboard:**
+```bash
+sudo ~/isolab/scripts/install-dashboard.sh
+```
+
 **Manage the dashboard service:**
 ```bash
 sudo systemctl status isolab-dashboard   # Check status
 sudo systemctl restart isolab-dashboard  # Restart
 sudo systemctl stop isolab-dashboard     # Stop
-sudo systemctl disable isolab-dashboard  # Disable auto-start
 ```
 
-**Manual start** (if not using systemd):
-```bash
-cd ~/isolab/dashboard
-python3 app.py
-```
-
-**Security note**: The dashboard has no authentication. Only expose it via Tailscale or localhost—never directly to the internet.
+**Security note**: The dashboard has no authentication. Only expose it via Tailscale or localhost — never directly to the internet.
 
 ### Tips
 
@@ -141,22 +184,27 @@ python3 app.py
 ```
 isolab/
 ├── README.md
-├── setup.sh               # Automated setup (./setup.sh --help)
-├── isolab.sh              # CLI entry point
+├── setup.sh                    # Automated setup (./setup.sh --help)
+├── isolab.sh                   # CLI entry point
+├── assets/
+│   └── flask.svg               # Project icon (Phosphor flask)
 ├── image/
-│   ├── Dockerfile         # Sandbox base image
-│   ├── entrypoint.sh      # SSH + env setup
-│   ├── tmux.conf          # Session persistence + logging
-│   ├── bashrc             # Auto-attach, aliases, starship
-│   ├── starship.toml      # Prompt config
-│   ├── motd.sh            # Login banner with network status
-│   └── disk-watchdog.sh   # Capacity warning cron
+│   ├── Dockerfile              # Sandbox base image
+│   ├── entrypoint.sh           # SSH + env setup
+│   ├── tmux.conf               # Session persistence + logging
+│   ├── bashrc                  # Auto-attach, aliases, starship
+│   ├── starship.toml           # Prompt config
+│   ├── motd.sh                 # Login banner with network status
+│   └── disk-watchdog.sh        # Capacity warning cron
 ├── dashboard/
-│   └── app.py             # Flask web UI
+│   └── app.py                  # Flask web UI
 ├── scripts/
-│   └── setup-networks.sh  # Restricted Docker network
+│   ├── setup-networks.sh       # Restricted Docker network
+│   ├── isolab-authkeys         # SSH proxy key lookup
+│   ├── isolab-proxy            # SSH proxy provisioner
+│   └── install-dashboard.sh    # Dashboard installer
 └── docs/
-    └── full-guide.md      # Detailed setup walkthrough
+    └── full-guide.md           # Detailed setup walkthrough
 ```
 
 ## Security Model

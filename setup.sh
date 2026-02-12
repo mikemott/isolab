@@ -99,7 +99,7 @@ print_logo() {
         echo "    \           /======"
         echo "     \_________/"
         echo -e "${NC}"
-        echo -e "  ${DIM_AMBER}  ⬡ Disposable sandboxed environments${NC}"
+        echo -e "  ${DIM_AMBER}  ⚗ Disposable sandboxed environments${NC}"
         echo -e "  ${DIM_AMBER}    for LLM agent work${NC}"
     else
         echo -e "${AMBER}${BOLD}"
@@ -1374,7 +1374,7 @@ screen_summary() {
 
 run_auto_mode() {
     echo ""
-    echo -e "  ${DIM_AMBER}⬡${NC} ${AMBER}${BOLD}ISOLAB SETUP${NC} ${DIM}(non-interactive)${NC}"
+    echo -e "  ${DIM_AMBER}⚗${NC} ${AMBER}${BOLD}ISOLAB SETUP${NC} ${DIM}(non-interactive)${NC}"
     echo -e "  ${DIM_AMBER}──────────────────────────────────────${NC}"
     echo ""
 

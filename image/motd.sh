@@ -40,7 +40,7 @@ MEM_USED=$(free -h 2>/dev/null | awk '/Mem:/{print $3}' || echo "?")
 DISK_USED=$(df -h / 2>/dev/null | awk 'NR==2{print $3"/"$2" ("$5")"}' || echo "?")
 
 echo ""
-echo -e "${GREEN}${BOLD}  ⬡ ISOLAB: ${LAB_NAME}${NC}"
+echo -e "${GREEN}${BOLD}  ⚗ ISOLAB: ${LAB_NAME}${NC}"
 echo -e "${DIM}  ──────────────────────────────────────${NC}"
 echo -e "  ${DIM}Network :${NC} ${NET_COLOR}${BOLD}${NET_ICON}${NC}"
 echo -e "  ${DIM}          ${NET_DESC}${NC}"

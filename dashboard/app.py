@@ -666,15 +666,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .container { padding: 12px; }
   }
 
-  .header h1 svg {
-    display: inline-block;
-    vertical-align: middle;
-    margin-right: 8px;
-    stroke: var(--green);
-    filter: drop-shadow(0 0 12px var(--green-glow));
-  }
 </style>
-<script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
 
@@ -682,7 +674,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="header">
     <div class="header-row">
-      <h1><i data-lucide="beaker" width="24" height="24"></i> Isolab</h1>
+      <h1><svg width="24" height="24" viewBox="0 0 256 256" fill="var(--green)" style="vertical-align:middle;margin-right:8px;filter:drop-shadow(0 0 12px var(--green-glow))"><path d="M221.69,199.77,160,96.92V40h8a8,8,0,0,0,0-16H88a8,8,0,0,0,0,16h8V96.92L34.31,199.77A16,16,0,0,0,48,224H208a16,16,0,0,0,13.72-24.23ZM110.86,103.25A7.93,7.93,0,0,0,112,99.14V40h32V99.14a7.93,7.93,0,0,0,1.14,4.11L183.36,167c-12,2.37-29.07,1.37-51.75-10.11-15.91-8.05-31.05-12.32-45.22-12.81ZM48,208l28.54-47.58c14.25-1.74,30.31,1.85,47.82,10.72,19,9.61,35,12.88,48,12.88a69.89,69.89,0,0,0,19.55-2.7L208,208Z"/></svg>Isolab</h1>
       <div class="header-meta">
         <div>HOST: <span id="hostname">—</span></div>
         <div>UPTIME: <span id="clock">—</span></div>
@@ -929,8 +921,6 @@ updateClock();
 setInterval(updateClock, 1000);
 refreshTimer = setInterval(refresh, 10000);
 
-// Initialize Lucide icons
-lucide.createIcons();
 </script>
 
 </body>
