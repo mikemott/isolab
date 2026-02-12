@@ -56,7 +56,7 @@ cmd_create() {
 
     # Find available port
     local port=$SSH_BASE_PORT
-    while ss -tlnp | grep -q ":${port} "; do
+    while ss -tlnH | awk '{print $4}' | grep -q ":${port}$"; do
         port=$((port + 1))
     done
 
