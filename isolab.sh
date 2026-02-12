@@ -157,7 +157,12 @@ cmd_ssh() {
         echo "error: lab '${name}' not found or not running"
         exit 1
     fi
-    exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" sandbox@localhost
+    local bind_ip
+    bind_ip=$(docker inspect --format='{{(index (index .NetworkSettings.Ports "22/tcp") 0).HostIp}}' "${CONTAINER_PREFIX}${name}" 2>/dev/null || echo "127.0.0.1")
+    if [ -z "$bind_ip" ] || [ "$bind_ip" = "0.0.0.0" ]; then
+        bind_ip="127.0.0.1"
+    fi
+    exec ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$port" sandbox@"$bind_ip"
 }
 
 cmd_stop() {
