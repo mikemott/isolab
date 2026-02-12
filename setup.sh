@@ -46,7 +46,15 @@ cleanup() {
     echo -e "${NC}"
 }
 
-trap cleanup EXIT INT TERM
+interrupt_handler() {
+    cleanup
+    echo ""
+    echo -e "${DIM}Setup cancelled.${NC}"
+    exit 130
+}
+
+trap cleanup EXIT
+trap interrupt_handler INT TERM
 
 hide_cursor() { tput civis 2>/dev/null || true; }
 show_cursor() { tput cnorm 2>/dev/null || true; }
