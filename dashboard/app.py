@@ -665,7 +665,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .actions-bar { flex-wrap: wrap; }
     .container { padding: 12px; }
   }
+
+  .header h1 svg {
+    display: inline-block;
+    vertical-align: middle;
+    margin-right: 8px;
+    stroke: var(--green);
+    filter: drop-shadow(0 0 12px var(--green-glow));
+  }
 </style>
+<script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
 
@@ -673,7 +682,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <div class="header">
     <div class="header-row">
-      <h1>⬡ Isolab</h1>
+      <h1><i data-lucide="beaker" width="24" height="24"></i> Isolab</h1>
       <div class="header-meta">
         <div>HOST: <span id="hostname">—</span></div>
         <div>UPTIME: <span id="clock">—</span></div>
@@ -919,6 +928,9 @@ refresh();
 updateClock();
 setInterval(updateClock, 1000);
 refreshTimer = setInterval(refresh, 10000);
+
+// Initialize Lucide icons
+lucide.createIcons();
 </script>
 
 </body>

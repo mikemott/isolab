@@ -70,13 +70,19 @@ clear_screen() {
 print_logo() {
     local compact="${1:-false}"
     echo -e "${AMBER}${BOLD}"
-    echo "       ╦╔═╗╔═╗╦  ╔═╗╔╗ "
-    echo "       ║╚═╗║ ║║  ╠═╣╠╩╗"
-    echo "       ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
-    echo -e "${NC}"
     if [ "$compact" = "false" ]; then
+        echo "          _"
+        echo "         ( )    ╦╔═╗╔═╗╦  ╔═╗╔╗ "
+        echo "        _| |_   ║╚═╗║ ║║  ╠═╣╠╩╗"
+        echo "       |_____|  ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
+        echo -e "${NC}"
         echo -e "  ${DIM_AMBER}  ⬡ Disposable sandboxed environments${NC}"
         echo -e "  ${DIM_AMBER}    for LLM agent work${NC}"
+    else
+        echo "   _   ╦╔═╗╔═╗╦  ╔═╗╔╗ "
+        echo "  ( )  ║╚═╗║ ║║  ╠═╣╠╩╗"
+        echo " |___| ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
+        echo -e "${NC}"
     fi
 }
 
