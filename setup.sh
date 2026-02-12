@@ -69,14 +69,36 @@ clear_screen() {
 
 print_logo() {
     local compact="${1:-false}"
-    echo -e "${AMBER}${BOLD}"
-    echo "       ╦╔═╗╔═╗╦  ╔═╗╔╗ "
-    echo "       ║╚═╗║ ║║  ╠═╣╠╩╗"
-    echo "       ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
-    echo -e "${NC}"
     if [ "$compact" = "false" ]; then
+        echo -e "${AMBER}${BOLD}"
+        echo "        o  .      #"
+        echo "       . .  .    ##"
+        echo "        . O o .  ###"
+        echo "      .  o  .     #"
+        echo "        o O.      |              ╦╔═╗╔═╗╦  ╔═╗╔╗ "
+        echo "        . o O     |/|            ║╚═╗║ ║║  ╠═╣╠╩╗"
+        echo "        ___o_    /,,|            ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
+        echo "        | O |   |,,,|"
+        echo "        |o .|   | ,,|"
+        echo "        | .o|   | , |"
+        echo "        |O  |   | , |"
+        echo "        | .O|   |   |"
+        echo "      __|o .|__ |   |"
+        echo "     / . O o  o\|   |"
+        echo "    /. O .o .O .\   |"
+        echo "   |^^^^^^^^^^^^^|  |"
+        echo "   |             |__|_"
+        echo "    \           /======"
+        echo "     \_________/"
+        echo -e "${NC}"
         echo -e "  ${DIM_AMBER}  ⬡ Disposable sandboxed environments${NC}"
         echo -e "  ${DIM_AMBER}    for LLM agent work${NC}"
+    else
+        echo -e "${AMBER}${BOLD}"
+        echo "       ╦╔═╗╔═╗╦  ╔═╗╔╗ "
+        echo "       ║╚═╗║ ║║  ╠═╣╠╩╗"
+        echo "       ╩╚═╝╚═╝╩═╝╩ ╩╚═╝"
+        echo -e "${NC}"
     fi
 }
 
