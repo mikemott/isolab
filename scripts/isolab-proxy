@@ -1,0 +1,82 @@
+#!/bin/bash
+#
+# isolab-proxy — Provisions/connects a container for the connecting SSH key
+#
+# Called via command= in authorized_keys (set by isolab-authkeys).
+# Usage: isolab-proxy <key-fingerprint>
+#
+
+set -euo pipefail
+
+FINGERPRINT="${1:-}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Read isolab.sh path from installed config, fall back to sibling directory
+if [ -f "${SCRIPT_DIR}/proxy.conf" ]; then
+    . "${SCRIPT_DIR}/proxy.conf"
+    ISOLAB="${ISOLAB_BIN}"
+else
+    ISOLAB="${SCRIPT_DIR}/../isolab.sh"
+fi
+CONTAINER_PREFIX="iso-"
+ISOLAB_CONFIG_DIR="${ISOLAB_CONFIG_DIR:-$HOME/.config/isolab}"
+MAP_FILE="${ISOLAB_CONFIG_DIR}/key-map"
+
+if [ -z "$FINGERPRINT" ]; then
+    echo "isolab-proxy: no fingerprint provided" >&2
+    exit 1
+fi
+
+# ── Determine container name ─────────────────────────
+# If SSH_ORIGINAL_COMMAND looks like a lab name (single word, alphanumeric
+# with hyphens/underscores), use it as the container name.
+# Otherwise, fall back to the fingerprint-based key-map.
+
+name=""
+cmd=""
+
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+    if [[ "$SSH_ORIGINAL_COMMAND" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+        # Looks like a lab name
+        name="$SSH_ORIGINAL_COMMAND"
+    else
+        # It's a command to run inside the container
+        cmd="$SSH_ORIGINAL_COMMAND"
+    fi
+fi
+
+# If no name from command, look up or generate from fingerprint
+if [ -z "$name" ]; then
+    if [ -f "$MAP_FILE" ]; then
+        name=$(grep -F "$FINGERPRINT" "$MAP_FILE" 2>/dev/null | head -1 | awk '{print $2}') || true
+    fi
+    if [ -z "$name" ]; then
+        slug=$(echo "$FINGERPRINT" | sed 's/.*://' | tail -c 7 | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+        name="lab-${slug}"
+        mkdir -p "$ISOLAB_CONFIG_DIR"
+        echo "${FINGERPRINT} ${name}" >> "$MAP_FILE"
+    fi
+fi
+
+container_name="${CONTAINER_PREFIX}${name}"
+
+# ── Ensure container exists and is running ───────────
+if ! docker ps --format '{{.Names}}' | grep -q "^${container_name}$"; then
+    if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
+        docker start "$container_name" > /dev/null 2>&1
+        sleep 1
+    else
+        "$ISOLAB" create "$name" --net=none > /dev/null 2>&1
+        sleep 1
+    fi
+fi
+
+# ── Connect ──────────────────────────────────────────
+if [ -n "$cmd" ]; then
+    exec docker exec -i "$container_name" su -l sandbox -c "$cmd"
+elif [ -t 0 ]; then
+    exec docker exec -it "$container_name" su -l sandbox
+else
+    # No TTY (lab name passed as SSH command) — use script to allocate one
+    exec script -qc "docker exec -it ${container_name} su -l sandbox" /dev/null
+fi

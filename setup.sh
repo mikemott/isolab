@@ -656,6 +656,10 @@ screen_options() {
     OPTION_DEFAULTS+=(1)
     OPTION_KEYS+=("install_cli")
 
+    OPTION_LABELS+=("SSH proxy (auto-provision on connect)")
+    OPTION_DEFAULTS+=(1)
+    OPTION_KEYS+=("ssh_proxy")
+
     OPTION_LABELS+=("Install web dashboard")
     OPTION_DEFAULTS+=(0)
     OPTION_KEYS+=("dashboard")
@@ -792,6 +796,7 @@ declare -A STEP_DESCRIPTIONS=(
     ["Build Isolab image"]="Building container image with dev tools (Python, Node.js, etc). This takes 3-5 minutes..."
     ["Restricted network"]="Creating Docker network with iptables rules for package-only access"
     ["Install CLI"]="Symlinking isolab command to /usr/local/bin"
+    ["SSH proxy"]="Configuring sshd on port 2222 for auto-provisioning containers"
     ["Web dashboard"]="Installing Flask and Docker Python packages"
 )
 
@@ -1026,6 +1031,92 @@ step_install_cli() {
     sudo ln -sf "${SCRIPT_DIR}/isolab.sh" "$target"
 }
 
+step_install_ssh_proxy() {
+    local real_user
+    real_user=$(whoami)
+    local install_dir="/usr/local/lib/isolab"
+
+    # Install scripts to root-owned directory (sshd requires the entire
+    # path chain for AuthorizedKeysCommand to be root-owned, not group/other writable)
+    echo "Installing proxy scripts to ${install_dir}..."
+    sudo mkdir -p "$install_dir"
+    sudo cp "${SCRIPT_DIR}/scripts/isolab-authkeys" "${install_dir}/isolab-authkeys"
+    sudo cp "${SCRIPT_DIR}/scripts/isolab-proxy" "${install_dir}/isolab-proxy"
+    sudo chown -R root:root "$install_dir"
+    sudo chmod 755 "$install_dir" "${install_dir}/isolab-authkeys" "${install_dir}/isolab-proxy"
+
+    # Proxy needs to find isolab.sh — write a small config the proxy reads
+    sudo tee "${install_dir}/proxy.conf" > /dev/null << CONF_EOF
+ISOLAB_BIN=${SCRIPT_DIR}/isolab.sh
+CONF_EOF
+    sudo chown root:root "${install_dir}/proxy.conf"
+    sudo chmod 644 "${install_dir}/proxy.conf"
+
+    # Create sshd config
+    local conf_dest="/etc/isolab-sshd.conf"
+    sudo tee "$conf_dest" > /dev/null << SSHD_EOF
+# isolab-sshd — auto-provision containers on SSH connect
+Port 2222
+ListenAddress 0.0.0.0
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+AuthorizedKeysCommand ${install_dir}/isolab-authkeys %u %f %t %k
+AuthorizedKeysCommandUser ${real_user}
+AuthorizedKeysFile none
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+SyslogFacility AUTH
+LogLevel INFO
+PermitRootLogin no
+AllowUsers ${real_user}
+MaxAuthTries 3
+MaxSessions 5
+LoginGraceTime 30
+PermitTTY yes
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+SSHD_EOF
+
+    # Validate config
+    echo "Validating sshd config..."
+    if ! sudo /usr/sbin/sshd -t -f "$conf_dest"; then
+        echo "ERROR: sshd config validation failed"
+        return 1
+    fi
+
+    # Install systemd service
+    echo "Installing systemd service..."
+    sudo tee /etc/systemd/system/isolab-sshd.service > /dev/null << SERVICE_EOF
+[Unit]
+Description=Isolab SSH Proxy (auto-provision containers on connect)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sshd -D -f ${conf_dest}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable isolab-sshd
+    sudo systemctl restart isolab-sshd
+
+    # Open port in UFW if active
+    if command -v ufw &>/dev/null && sudo ufw status | grep -q "Status: active"; then
+        sudo ufw allow 2222/tcp comment "isolab proxy" 2>/dev/null || true
+    fi
+
+    echo "SSH proxy running on port 2222"
+    echo "  Connect: ssh -p 2222 ${real_user}@<this-host>"
+}
+
 step_install_dashboard() {
     # Install dependencies
     echo "Installing Flask and Docker Python packages..."
@@ -1178,6 +1269,11 @@ screen_install() {
         run_step "$(progress_label "Install CLI")" step_install_cli || errors=$((errors + 1))
     fi
 
+    # -- Optional: SSH proxy
+    if is_selected "ssh_proxy"; then
+        run_step "$(progress_label "SSH proxy")" step_install_ssh_proxy || errors=$((errors + 1))
+    fi
+
     # -- Optional: dashboard
     if is_selected "dashboard"; then
         run_step "$(progress_label "Web dashboard")" step_install_dashboard || errors=$((errors + 1))
@@ -1227,6 +1323,15 @@ screen_summary() {
     draw_box_line "$w" "  ${AMBER}isolab ssh myproject${NC}"
     draw_box_line "$w" "  ${AMBER}isolab rm myproject${NC}"
     draw_box_empty "$w"
+
+    # Show SSH proxy info if installed
+    if is_selected "ssh_proxy"; then
+        draw_box_separator "$w"
+        draw_box_line "$w" "${GREEN}✓  SSH proxy running on port 2222${NC}"
+        draw_box_line "$w" "  ${AMBER}ssh -p 2222 $(whoami)@<this-host>${NC}"
+        draw_box_line "$w" "  ${DIM}Auto-provisions a container on connect${NC}"
+        draw_box_empty "$w"
+    fi
 
     # Show dashboard info if installed
     if is_selected "dashboard"; then
