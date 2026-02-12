@@ -61,11 +61,13 @@ cmd_create() {
     done
 
     # Parse network mode
+    # Note: --network=none disables all networking including port mapping,
+    # so for "none" mode we use the default bridge and block egress via iptables
     local docker_net_args=""
     local net_display=""
     case "$net_mode" in
         --net=none)
-            docker_net_args="--network=none"
+            docker_net_args=""
             net_display="ISOLATED"
             ;;
         --net=packages)
@@ -104,6 +106,17 @@ cmd_create() {
         --label isolab.created="$(date -Iseconds)" \
         "${ISOLAB_IMAGE}" > /dev/null
 
+    # For "none" mode, block all container egress via iptables
+    if [ "$net_mode" = "--net=none" ]; then
+        local container_ip
+        container_ip=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}" 2>/dev/null)
+        if [ -n "$container_ip" ]; then
+            sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP -m comment --comment "isolab-${name}-block"
+            # Allow established (for SSH port mapping to work)
+            sudo iptables -I DOCKER-USER -s "$container_ip" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "isolab-${name}-block"
+        fi
+    fi
+
     echo "  Port:    ${port}"
     echo "  tmux:    auto-attaches on login"
     echo "  Logs:    ~/logs/ inside container"
@@ -123,7 +136,7 @@ cmd_list() {
     printf "  %-16s %-10s %-8s %-12s %-14s\n" "NAME" "STATUS" "PORT" "NETWORK" "UPTIME"
     printf "  %-16s %-10s %-8s %-12s %-14s\n" "────────────────" "──────────" "────────" "────────────" "──────────────"
 
-    docker ps -a --filter "label=isolab=true" --format '{{.Names}}|{{.Status}}' | while IFS='|' read -r cname status; do
+    while IFS='|' read -r cname status; do
         local name="${cname#${CONTAINER_PREFIX}}"
         local port
         port=$(get_ssh_port "$name")
@@ -141,9 +154,9 @@ cmd_list() {
 
         printf "  %-16s %-10s %-8s %-12s %-14s\n" "$name" "$short_status" "$port" "$net" "$uptime"
         count=$((count + 1))
-    done
+    done < <(docker ps -a --filter "label=isolab=true" --format '{{.Names}}|{{.Status}}')
 
-    if [ "$count" -eq 0 ] 2>/dev/null; then
+    if [ "$count" -eq 0 ]; then
         echo "  (no labs)"
     fi
     echo ""
@@ -184,6 +197,10 @@ cmd_start() {
 cmd_rm() {
     local name="$1"
     echo "isolab: destroying '${name}'..."
+    # Clean up iptables rules for this container
+    sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "isolab-${name}-block" | while read -r rule; do
+        sudo iptables ${rule/-A/-D} 2>/dev/null || true
+    done
     docker rm -f "${CONTAINER_PREFIX}${name}" > /dev/null
     echo "  Gone."
 }
