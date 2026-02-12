@@ -111,9 +111,13 @@ cmd_create() {
         local container_ip
         container_ip=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}" 2>/dev/null)
         if [ -n "$container_ip" ]; then
-            sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP -m comment --comment "isolab-${name}-block"
-            # Allow established (for SSH port mapping to work)
-            sudo iptables -I DOCKER-USER -s "$container_ip" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "isolab-${name}-block"
+            if sudo -n true 2>/dev/null; then
+                sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP -m comment --comment "isolab-${name}-block"
+                sudo iptables -I DOCKER-USER -s "$container_ip" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "isolab-${name}-block"
+            else
+                echo "  warning: could not set iptables rules (need sudo)"
+                echo "  container has network access — run with sudo for full isolation"
+            fi
         fi
     fi
 
@@ -197,10 +201,14 @@ cmd_start() {
 cmd_rm() {
     local name="$1"
     echo "isolab: destroying '${name}'..."
-    # Clean up iptables rules for this container
-    sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "isolab-${name}-block" | while read -r rule; do
-        sudo iptables ${rule/-A/-D} 2>/dev/null || true
-    done
+    # Clean up iptables rules for this container (non-fatal if sudo unavailable)
+    if sudo -n true 2>/dev/null; then
+        sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "isolab-${name}-block" | while read -r rule; do
+            sudo iptables ${rule/-A/-D} 2>/dev/null || true
+        done
+    else
+        echo "  warning: skipping iptables cleanup (run with sudo to clean firewall rules)"
+    fi
     docker rm -f "${CONTAINER_PREFIX}${name}" > /dev/null
     echo "  Gone."
 }
