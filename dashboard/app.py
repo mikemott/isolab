@@ -169,7 +169,7 @@ def get_sandboxes():
     containers = client.containers.list(all=True, filters={"label": "isolab=true"})
 
     for c in containers:
-        name = c.name.replace(CONTAINER_PREFIX, "")
+        name = c.name.removeprefix(CONTAINER_PREFIX)
         labels = c.labels
 
         ssh_port = "N/A"
@@ -418,11 +418,15 @@ def api_create():
                 "isolab.created": datetime.now().isoformat(),
             },
         )
-        # Apply iptables rules via isolab.sh
+        # Persist mode and apply iptables rules
+        os.makedirs(MODES_DIR, exist_ok=True)
+        with open(os.path.join(MODES_DIR, name), "w") as mf:
+            mf.write(mode)
         _isolab_cmd("set-net", name, mode)
         return jsonify({"ok": True, "name": name, "port": port})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Failed to create lab %s", name)
+        return jsonify({"error": "Internal error creating lab"}), 500
 
 
 @app.route("/api/lab/<name>/stop", methods=["POST"])
@@ -491,7 +495,7 @@ def api_nuke():
     containers = client.containers.list(all=True, filters={"label": "isolab=true"})
     count = 0
     for c in containers:
-        name = c.name.replace(CONTAINER_PREFIX, "")
+        name = c.name.removeprefix(CONTAINER_PREFIX)
         _isolab_cmd("set-net", name, "open")  # clear rules
         c.remove(force=True)
         count += 1

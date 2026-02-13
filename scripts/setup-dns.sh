@@ -11,7 +11,9 @@
 
 set -euo pipefail
 
-ISOLAB_CONFIG_DIR="${ISOLAB_CONFIG_DIR:-${SUDO_USER:+/home/${SUDO_USER}}/.config/isolab}"
+_home="${SUDO_USER:+/home/${SUDO_USER}}"
+_home="${_home:-${HOME:-/root}}"
+ISOLAB_CONFIG_DIR="${ISOLAB_CONFIG_DIR:-${_home}/.config/isolab}"
 ALLOWLIST_FILE="${ISOLAB_CONFIG_DIR}/packages-allowlist.conf"
 DNSMASQ_CONF_DIR="/etc/isolab"
 DNSMASQ_CONF="${DNSMASQ_CONF_DIR}/dnsmasq.conf"

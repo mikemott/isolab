@@ -65,6 +65,7 @@ _set_mode() {
 _net_clear_rules() {
     local name="$1"
     if ! sudo -n true 2>/dev/null; then
+        echo "  warning: could not clear iptables rules for '${name}' (need sudo)"
         return 0
     fi
     # Clear filter rules (new tag: isolab-${name}-net, legacy: isolab-${name}-block)
