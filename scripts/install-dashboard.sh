@@ -21,6 +21,7 @@ ExecStart=/usr/bin/python3 ${REPO_DIR}/dashboard/app.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=ISOLAB_BIND=127.0.0.1
 
 [Install]
 WantedBy=multi-user.target
@@ -29,5 +30,7 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now isolab-dashboard
 
-echo "  Dashboard running at http://0.0.0.0:8080"
+echo "  Dashboard installed. Set password if needed:"
+echo "    python3 ${REPO_DIR}/dashboard/app.py --set-password"
+echo ""
 sudo systemctl status isolab-dashboard --no-pager

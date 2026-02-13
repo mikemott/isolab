@@ -20,10 +20,15 @@ case "$NET_MODE" in
         ;;
     PACKAGES)
         NET_COLOR="$AMBER"
-        NET_ICON="◎ RESTRICTED"
-        NET_DESC="Outbound to package registries only (ports 80/443)."
+        NET_ICON="◎ FILTERED"
+        NET_DESC="DNS-filtered allowlist + ports 80/443 only."
         ;;
-    FULL)
+    WEB)
+        NET_COLOR="$CYAN"
+        NET_ICON="◎ RESTRICTED"
+        NET_DESC="HTTP/HTTPS/DNS only. No SSH, no raw sockets."
+        ;;
+    OPEN)
         NET_COLOR="$CYAN"
         NET_ICON="○ OPEN"
         NET_DESC="Full network access. Be cautious."

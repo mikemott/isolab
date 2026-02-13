@@ -5,10 +5,15 @@ for disposable LLM development containers.
 """
 
 import os
+import sys
 import subprocess
+import hashlib
+import secrets
+import getpass
+import time
 from datetime import datetime
 
-from flask import Flask, render_template_string, jsonify, request
+from flask import Flask, render_template_string, jsonify, request, session, redirect, url_for
 
 import docker
 
@@ -21,6 +26,124 @@ SSH_KEY_FILE = os.environ.get(
     "SSH_KEY_FILE", os.path.expanduser("~/.ssh/id_ed25519.pub")
 )
 SSH_BASE_PORT = 2200
+CONFIG_DIR = os.path.expanduser("~/.config/isolab")
+MODES_DIR = os.path.join(CONFIG_DIR, "modes")
+DASHBOARD_ENV = os.path.join(CONFIG_DIR, "dashboard.env")
+ISOLAB_BIN = os.environ.get(
+    "ISOLAB_BIN",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "isolab.sh"),
+)
+
+# Network mode definitions
+NET_MODES = {
+    "none": "ISOLATED",
+    "packages": "PACKAGES",
+    "web": "WEB",
+    "open": "OPEN",
+}
+
+
+def _isolab_cmd(*args):
+    """Run an isolab.sh subcommand. Returns (ok, output)."""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", ISOLAB_BIN, *args],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result.returncode == 0, result.stdout + result.stderr
+    except Exception as e:
+        return False, str(e)
+
+
+# ─── Auth ──────────────────────────────────────────────
+
+
+def load_dashboard_config():
+    """Load credentials from dashboard.env."""
+    config = {}
+    if not os.path.exists(DASHBOARD_ENV):
+        return None
+    with open(DASHBOARD_ENV) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                key, value = line.split("=", 1)
+                config[key.strip()] = value.strip()
+    required = [
+        "ISOLAB_DASH_USER",
+        "ISOLAB_DASH_HASH",
+        "ISOLAB_DASH_SALT",
+        "ISOLAB_DASH_SECRET",
+    ]
+    if all(k in config for k in required):
+        return config
+    return None
+
+
+def hash_password(password, salt=None):
+    """Hash password with scrypt. Returns (hash_hex, salt_hex)."""
+    if salt is None:
+        salt = secrets.token_bytes(32)
+    elif isinstance(salt, str):
+        salt = bytes.fromhex(salt)
+    h = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=64)
+    return h.hex(), salt.hex()
+
+
+def verify_password(password, stored_hash, salt_hex):
+    """Verify password against stored hash."""
+    computed, _ = hash_password(password, salt_hex)
+    return secrets.compare_digest(computed, stored_hash)
+
+
+def set_password_interactive():
+    """Interactive password setup."""
+    print("═" * 50)
+    print("  ISOLAB DASHBOARD — SET PASSWORD")
+    print("═" * 50)
+    username = input("Username [admin]: ").strip() or "admin"
+    password = getpass.getpass("Password: ")
+    if not password:
+        print("Error: password cannot be empty.")
+        sys.exit(1)
+    confirm = getpass.getpass("Confirm:  ")
+    if password != confirm:
+        print("Error: passwords do not match.")
+        sys.exit(1)
+    hash_hex, salt_hex = hash_password(password)
+    secret_key = secrets.token_hex(32)
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(DASHBOARD_ENV, "w") as f:
+        f.write(f"ISOLAB_DASH_USER={username}\n")
+        f.write(f"ISOLAB_DASH_HASH={hash_hex}\n")
+        f.write(f"ISOLAB_DASH_SALT={salt_hex}\n")
+        f.write(f"ISOLAB_DASH_SECRET={secret_key}\n")
+    os.chmod(DASHBOARD_ENV, 0o600)
+    print(f"\n  Credentials saved to {DASHBOARD_ENV}")
+    print(f"  Username: {username}")
+    print("  Password: ****")
+    print("\n  Restart the dashboard to apply.")
+
+
+# ─── Rate Limiter ──────────────────────────────────────
+
+_rate_limits = {}
+
+
+def rate_limit_check(key, max_requests, window_seconds):
+    """Returns (allowed, retry_after). Cleans expired entries."""
+    now = time.time()
+    if key not in _rate_limits:
+        _rate_limits[key] = []
+    _rate_limits[key] = [t for t in _rate_limits[key] if now - t < window_seconds]
+    if len(_rate_limits[key]) >= max_requests:
+        oldest = _rate_limits[key][0]
+        retry_after = int(window_seconds - (now - oldest)) + 1
+        return False, retry_after
+    _rate_limits[key].append(now)
+    return True, 0
 
 
 def get_bind_ip():
@@ -46,7 +169,7 @@ def get_sandboxes():
     containers = client.containers.list(all=True, filters={"label": "isolab=true"})
 
     for c in containers:
-        name = c.name.replace(CONTAINER_PREFIX, "")
+        name = c.name.removeprefix(CONTAINER_PREFIX)
         labels = c.labels
 
         ssh_port = "N/A"
@@ -55,12 +178,22 @@ def get_sandboxes():
             if "22/tcp" in ports and ports["22/tcp"]:
                 ssh_port = ports["22/tcp"][0].get("HostPort", "N/A")
 
-        net_mode = labels.get("isolab.net", "unknown")
-        net_display = {
-            "--net=none": "ISOLATED",
-            "--net=packages": "PACKAGES",
-            "--net=full": "FULL",
-        }.get(net_mode, net_mode)
+        # Read mode from file first, fall back to Docker label
+        mode_file = os.path.join(MODES_DIR, name)
+        if os.path.exists(mode_file):
+            with open(mode_file) as mf:
+                net_mode = mf.read().strip()
+        else:
+            label = labels.get("isolab.net", "none")
+            # Map old label formats
+            label_map = {
+                "--net=none": "none", "none": "none",
+                "--net=packages": "web", "packages": "web",
+                "--net=full": "open", "full": "open", "open": "open",
+                "--net=web": "web", "web": "web",
+            }
+            net_mode = label_map.get(label, "none")
+        net_display = NET_MODES.get(net_mode, net_mode.upper())
 
         created = labels.get("isolab.created", "")
         try:
@@ -149,6 +282,66 @@ def get_host_stats():
     }
 
 
+# ─── Auth Middleware ────────────────────────────────────
+
+
+@app.before_request
+def require_auth():
+    if request.path in ("/login", "/favicon.ico"):
+        return None
+    if not session.get("authenticated"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Unauthorized"}), 401
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        token = request.headers.get("X-CSRF-Token", "")
+        if not token or not secrets.compare_digest(
+            token, session.get("csrf_token", "")
+        ):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+    if request.path == "/api/lab/create" and request.method == "POST":
+        ip = request.remote_addr
+        allowed, retry_after = rate_limit_check(f"create:{ip}", 10, 60)
+        if not allowed:
+            return (
+                jsonify({"error": "Rate limit exceeded", "retry_after": retry_after}),
+                429,
+            )
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        return render_template_string(LOGIN_HTML, error=None)
+    ip = request.remote_addr
+    allowed, retry_after = rate_limit_check(f"login:{ip}", 5, 60)
+    if not allowed:
+        return (
+            render_template_string(
+                LOGIN_HTML,
+                error=f"Too many attempts. Try again in {retry_after}s.",
+            ),
+            429,
+        )
+    username = request.form.get("username", "")
+    password = request.form.get("password", "")
+    if username == app.config.get("DASH_USER") and verify_password(
+        password, app.config.get("DASH_HASH", ""), app.config.get("DASH_SALT", "")
+    ):
+        session.clear()
+        session["authenticated"] = True
+        session["username"] = username
+        session["csrf_token"] = secrets.token_hex(32)
+        return redirect(url_for("index"))
+    return render_template_string(LOGIN_HTML, error="Invalid credentials"), 401
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
 # ─── API ────────────────────────────────────────────────
 
 
@@ -197,16 +390,10 @@ def api_create():
     while port in used_ports:
         port += 1
 
-    net_map = {
-        "none": {"network_mode": "none"},
-        "packages": {"network": "isolab-packages"},
-        "full": {},
-    }
-    net_kwargs = net_map.get(net, {"network_mode": "none"})
-    net_label = f"--net={net}"
-    net_display = {"none": "ISOLATED", "packages": "PACKAGES", "full": "FULL"}.get(
-        net, "ISOLATED"
-    )
+    # Validate and normalize mode
+    mode_map = {"none": "none", "packages": "packages", "web": "web", "open": "open", "full": "open"}
+    mode = mode_map.get(net, "none")
+    net_display = NET_MODES.get(mode, "ISOLATED")
 
     bind_ip = get_bind_ip()
 
@@ -227,20 +414,26 @@ def api_create():
             labels={
                 "isolab": "true",
                 "isolab.name": name,
-                "isolab.net": net_label,
+                "isolab.net": mode,
                 "isolab.created": datetime.now().isoformat(),
             },
-            **net_kwargs,
         )
+        # Persist mode and apply iptables rules
+        os.makedirs(MODES_DIR, exist_ok=True)
+        with open(os.path.join(MODES_DIR, name), "w") as mf:
+            mf.write(mode)
+        _isolab_cmd("set-net", name, mode)
         return jsonify({"ok": True, "name": name, "port": port})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        app.logger.exception("Failed to create lab %s", name)
+        return jsonify({"error": "Internal error creating lab"}), 500
 
 
 @app.route("/api/lab/<name>/stop", methods=["POST"])
 def api_stop(name):
     try:
         c = client.containers.get(f"{CONTAINER_PREFIX}{name}")
+        _isolab_cmd("set-net", name, "open")  # clear rules before stop
         c.stop(timeout=5)
         return jsonify({"ok": True})
     except docker.errors.NotFound:
@@ -252,6 +445,13 @@ def api_start(name):
     try:
         c = client.containers.get(f"{CONTAINER_PREFIX}{name}")
         c.start()
+        # Re-apply network rules from persisted mode
+        mode_file = os.path.join(MODES_DIR, name)
+        mode = "none"
+        if os.path.exists(mode_file):
+            with open(mode_file) as mf:
+                mode = mf.read().strip()
+        _isolab_cmd("set-net", name, mode)
         return jsonify({"ok": True})
     except docker.errors.NotFound:
         return jsonify({"error": "Not found"}), 404
@@ -261,7 +461,15 @@ def api_start(name):
 def api_restart(name):
     try:
         c = client.containers.get(f"{CONTAINER_PREFIX}{name}")
+        _isolab_cmd("set-net", name, "open")  # clear rules before restart
         c.restart(timeout=5)
+        # Re-apply network rules from persisted mode
+        mode_file = os.path.join(MODES_DIR, name)
+        mode = "none"
+        if os.path.exists(mode_file):
+            with open(mode_file) as mf:
+                mode = mf.read().strip()
+        _isolab_cmd("set-net", name, mode)
         return jsonify({"ok": True})
     except docker.errors.NotFound:
         return jsonify({"error": "Not found"}), 404
@@ -271,7 +479,12 @@ def api_restart(name):
 def api_remove(name):
     try:
         c = client.containers.get(f"{CONTAINER_PREFIX}{name}")
+        _isolab_cmd("set-net", name, "open")  # clear rules
         c.remove(force=True)
+        # Clean up mode file
+        mode_file = os.path.join(MODES_DIR, name)
+        if os.path.exists(mode_file):
+            os.remove(mode_file)
         return jsonify({"ok": True})
     except docker.errors.NotFound:
         return jsonify({"error": "Not found"}), 404
@@ -282,8 +495,14 @@ def api_nuke():
     containers = client.containers.list(all=True, filters={"label": "isolab=true"})
     count = 0
     for c in containers:
+        name = c.name.removeprefix(CONTAINER_PREFIX)
+        _isolab_cmd("set-net", name, "open")  # clear rules
         c.remove(force=True)
         count += 1
+    # Clean up all mode files
+    if os.path.isdir(MODES_DIR):
+        for f in os.listdir(MODES_DIR):
+            os.remove(os.path.join(MODES_DIR, f))
     return jsonify({"ok": True, "removed": count})
 
 
@@ -292,7 +511,9 @@ def api_nuke():
 
 @app.route("/")
 def index():
-    return render_template_string(DASHBOARD_HTML)
+    return render_template_string(
+        DASHBOARD_HTML, csrf_token=session.get("csrf_token", "")
+    )
 
 
 DASHBOARD_HTML = r"""<!DOCTYPE html>
@@ -301,6 +522,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ISOLAB</title>
+<meta name="csrf-token" content="{{ csrf_token }}">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
 
@@ -496,7 +718,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   select.input {
     appearance: none;
     cursor: pointer;
-    width: 140px;
+    width: 200px;
     padding-right: 24px;
     background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='6'%3E%3Cpath d='M0 0l6 6 6-6' fill='%235a6a7a'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -569,7 +791,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   .badge-net-isolated { color: var(--red); border-color: var(--red-dim); background: rgba(255, 68, 68, 0.06); }
   .badge-net-packages { color: var(--amber); border-color: var(--amber-dim); background: rgba(255, 170, 0, 0.06); }
-  .badge-net-full { color: var(--cyan); border-color: var(--cyan-dim); background: rgba(0, 221, 255, 0.06); }
+  .badge-net-web { color: var(--cyan); border-color: var(--cyan-dim); background: rgba(0, 221, 255, 0.06); }
+  .badge-net-open { color: var(--green); border-color: var(--green-dim); background: rgba(0, 255, 136, 0.06); }
 
   .ssh-cmd { font-size: 11px; color: var(--green-dim); cursor: pointer; opacity: 0.8; }
   .ssh-cmd:hover { opacity: 1; text-decoration: underline; }
@@ -678,6 +901,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="header-meta">
         <div>HOST: <span id="hostname">—</span></div>
         <div>UPTIME: <span id="clock">—</span></div>
+        <div style="margin-top:4px"><a href="/logout" style="color:var(--text-dim);text-decoration:none;font-size:10px;letter-spacing:1px">LOGOUT ▸</a></div>
       </div>
     </div>
   </div>
@@ -747,8 +971,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <label>Network</label>
     <select class="input" id="newNet">
       <option value="none">ISOLATED (none)</option>
-      <option value="packages">PACKAGES ONLY</option>
-      <option value="full">FULL ACCESS</option>
+      <option value="packages">PACKAGES (dns filtered)</option>
+      <option value="web">WEB (http/https)</option>
+      <option value="open">OPEN (unrestricted)</option>
     </select>
     <div class="modal-actions">
       <button class="btn" onclick="hideCreateModal()">Cancel</button>
@@ -761,6 +986,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <script>
 const API = '';
+const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').content;
 let refreshTimer;
 
 async function refresh() {
@@ -814,7 +1040,8 @@ function renderLabs(labs) {
     const netClass = {
       'ISOLATED': 'badge-net-isolated',
       'PACKAGES': 'badge-net-packages',
-      'FULL': 'badge-net-full',
+      'WEB': 'badge-net-web',
+      'OPEN': 'badge-net-open',
     }[s.network] || '';
 
     const sshDisplay = s.ssh_port !== 'N/A'
@@ -848,7 +1075,7 @@ function renderLabs(labs) {
 async function doAction(action, name) {
   if (action === 'remove' && !confirm(`Destroy lab "${name}"? This is permanent.`)) return;
   try {
-    const res = await fetch(`${API}/api/lab/${name}/${action}`, { method: 'POST' });
+    const res = await fetch(`${API}/api/lab/${name}/${action}`, { method: 'POST', headers: {'X-CSRF-Token': CSRF_TOKEN} });
     const data = await res.json();
     if (data.ok) toast(`${action}: ${name}`);
     else toast(data.error || 'Failed', true);
@@ -863,7 +1090,7 @@ async function doCreate() {
   try {
     const res = await fetch(`${API}/api/lab/create`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
       body: JSON.stringify({ name, network: net }),
     });
     const data = await res.json();
@@ -876,7 +1103,7 @@ async function doCreate() {
 async function nukeAll() {
   if (!confirm('Destroy ALL labs? This cannot be undone.')) return;
   try {
-    const res = await fetch(`${API}/api/lab/nuke`, { method: 'POST' });
+    const res = await fetch(`${API}/api/lab/nuke`, { method: 'POST', headers: {'X-CSRF-Token': CSRF_TOKEN} });
     const data = await res.json();
     toast(`Nuked ${data.removed} lab(s)`);
   } catch (e) { toast('Nuke failed', true); }
@@ -927,9 +1154,187 @@ refreshTimer = setInterval(refresh, 10000);
 </html>"""
 
 
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISOLAB — Login</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap');
+
+  :root {
+    --bg: #0a0e14;
+    --bg-panel: #0d1117;
+    --border: #1e2a3a;
+    --green: #00ff88;
+    --green-dim: #00cc6a;
+    --green-glow: rgba(0, 255, 136, 0.15);
+    --red: #ff4444;
+    --text: #c0c8d4;
+    --text-dim: #5a6a7a;
+    --text-bright: #e8eef4;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', 'Courier New', monospace;
+    font-size: 13px;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0, 0, 0, 0.08) 2px, rgba(0, 0, 0, 0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  .login-box {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    padding: 32px;
+    width: 340px;
+    position: relative;
+  }
+
+  .login-box::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, var(--green), transparent);
+    opacity: 0.6;
+  }
+
+  .login-box h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--green);
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    text-shadow: 0 0 20px var(--green-glow);
+    text-align: center;
+    margin-bottom: 24px;
+  }
+
+  .login-box svg {
+    display: block;
+    margin: 0 auto 16px;
+    filter: drop-shadow(0 0 12px var(--green-glow));
+  }
+
+  label {
+    display: block;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+    margin-top: 14px;
+  }
+
+  label:first-of-type { margin-top: 0; }
+
+  .input {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text-bright);
+    outline: none;
+    width: 100%;
+  }
+
+  .input:focus {
+    border-color: var(--green-dim);
+    box-shadow: 0 0 8px var(--green-glow);
+  }
+
+  .error-msg {
+    color: var(--red);
+    font-size: 11px;
+    margin-top: 12px;
+    text-align: center;
+  }
+
+  .btn {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 10px 16px;
+    border: 1px solid var(--green-dim);
+    background: var(--bg-panel);
+    color: var(--green);
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    width: 100%;
+    margin-top: 20px;
+    transition: all 0.15s ease;
+  }
+
+  .btn:hover {
+    background: rgba(0, 255, 136, 0.12);
+    box-shadow: 0 0 12px var(--green-glow);
+  }
+</style>
+</head>
+<body>
+<div class="login-box">
+  <svg width="32" height="32" viewBox="0 0 256 256" fill="var(--green)"><path d="M221.69,199.77,160,96.92V40h8a8,8,0,0,0,0-16H88a8,8,0,0,0,0,16h8V96.92L34.31,199.77A16,16,0,0,0,48,224H208a16,16,0,0,0,13.72-24.23ZM110.86,103.25A7.93,7.93,0,0,0,112,99.14V40h32V99.14a7.93,7.93,0,0,0,1.14,4.11L183.36,167c-12,2.37-29.07,1.37-51.75-10.11-15.91-8.05-31.05-12.32-45.22-12.81ZM48,208l28.54-47.58c14.25-1.74,30.31,1.85,47.82,10.72,19,9.61,35,12.88,48,12.88a69.89,69.89,0,0,0,19.55-2.7L208,208Z"/></svg>
+  <h1>Isolab</h1>
+  <form method="POST" action="/login">
+    <label>Username</label>
+    <input class="input" type="text" name="username" placeholder="admin" autofocus>
+    <label>Password</label>
+    <input class="input" type="password" name="password">
+    {% if error %}<div class="error-msg">{{ error }}</div>{% endif %}
+    <button class="btn" type="submit">Login ▸</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
 if __name__ == "__main__":
+    if "--set-password" in sys.argv:
+        set_password_interactive()
+        sys.exit(0)
+
+    config = load_dashboard_config()
+    if not config:
+        print("═" * 50)
+        print("  ISOLAB DASHBOARD — NOT CONFIGURED")
+        print()
+        print("  Run first:  python3 dashboard/app.py --set-password")
+        print("═" * 50)
+        sys.exit(1)
+
+    app.secret_key = config["ISOLAB_DASH_SECRET"]
+    app.config["DASH_USER"] = config["ISOLAB_DASH_USER"]
+    app.config["DASH_HASH"] = config["ISOLAB_DASH_HASH"]
+    app.config["DASH_SALT"] = config["ISOLAB_DASH_SALT"]
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+    bind = os.environ.get("ISOLAB_BIND", "127.0.0.1")
+    port = int(os.environ.get("ISOLAB_PORT", "8080"))
     print("═" * 50)
     print("  ISOLAB DASHBOARD")
-    print("  http://0.0.0.0:8080")
+    print(f"  http://{bind}:{port}")
     print("═" * 50)
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host=bind, port=port, debug=False)

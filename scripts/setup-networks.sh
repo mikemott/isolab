@@ -75,3 +75,16 @@ echo "  ✗ All other outbound traffic is BLOCKED"
 echo ""
 echo "Tip: For tighter control, point containers at an AdGuard Home"
 echo "     instance configured to only resolve package registry domains."
+echo ""
+
+# ─── DNS filtering setup (for packages mode) ────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/setup-dns.sh" ]; then
+    echo "Setting up DNS filtering for packages mode..."
+    echo ""
+    bash "${SCRIPT_DIR}/setup-dns.sh"
+else
+    echo "Note: scripts/setup-dns.sh not found — skipping DNS filter setup."
+    echo "  Packages mode (DNS-filtered) won't be available until you run:"
+    echo "    sudo isolab setup-dns"
+fi
