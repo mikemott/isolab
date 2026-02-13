@@ -163,8 +163,12 @@ _net_switch() {
     local name="$1"
     local mode="$2"
     _net_clear_rules "$name"
-    _net_apply_rules "$name" "$mode"
-    _set_mode "$name" "$mode"
+    if _net_apply_rules "$name" "$mode"; then
+        _set_mode "$name" "$mode"
+    else
+        echo "  warning: rules not applied — mode not persisted"
+        return 1
+    fi
 }
 
 # Map mode to display name for MOTD
