@@ -3,27 +3,179 @@
 # isolab — Disposable, sandboxed environments for LLM agent work
 #
 # Usage:
-#   isolab create <n> [--net=none|packages|full]
+#   isolab create <n> [--net=none|packages|web|open]
 #   isolab list
 #   isolab ssh <n>
 #   isolab stop <n>
 #   isolab start <n>
 #   isolab rm <n>
 #   isolab logs <n>
+#   isolab set-net <n> <mode>
 #   isolab nuke
 #   isolab keys add <key-string | key-file>
 #   isolab keys list
 #   isolab keys rm <index>
 #   isolab keys sync [name]
+#   isolab setup-dns
+#   isolab dns-reload
 #
 
 set -euo pipefail
 
 ISOLAB_CONFIG_DIR="${ISOLAB_CONFIG_DIR:-$HOME/.config/isolab}"
 ISOLAB_KEYS_FILE="${ISOLAB_CONFIG_DIR}/authorized_keys"
+ISOLAB_MODES_DIR="${ISOLAB_CONFIG_DIR}/modes"
 ISOLAB_IMAGE="${ISOLAB_IMAGE:-isolab:latest}"
 CONTAINER_PREFIX="iso-"
 SSH_BASE_PORT=2200
+
+# ─── Network Engine ──────────────────────────────────
+
+_get_container_ip() {
+    local container_name="$1"
+    docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$container_name" 2>/dev/null
+}
+
+_get_mode() {
+    local name="$1"
+    # Prefer mode file
+    if [ -f "${ISOLAB_MODES_DIR}/${name}" ]; then
+        cat "${ISOLAB_MODES_DIR}/${name}"
+        return
+    fi
+    # Fallback: read Docker label and map old names
+    local label
+    label=$(docker inspect --format='{{index .Config.Labels "isolab.net"}}' "${CONTAINER_PREFIX}${name}" 2>/dev/null || echo "")
+    case "$label" in
+        --net=none|none)       echo "none" ;;
+        --net=packages|packages) echo "web" ;;  # old packages was actually web-only
+        --net=full|full|open)  echo "open" ;;
+        --net=web|web)         echo "web" ;;
+        *)                     echo "none" ;;
+    esac
+}
+
+_set_mode() {
+    local name="$1"
+    local mode="$2"
+    mkdir -p "$ISOLAB_MODES_DIR"
+    echo "$mode" > "${ISOLAB_MODES_DIR}/${name}"
+}
+
+_net_clear_rules() {
+    local name="$1"
+    if ! sudo -n true 2>/dev/null; then
+        return 0
+    fi
+    # Clear filter rules (new tag: isolab-${name}-net, legacy: isolab-${name}-block)
+    local tag
+    for tag in "isolab-${name}-net" "isolab-${name}-block"; do
+        sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "--comment ${tag}" | while read -r rule; do
+            sudo iptables ${rule/-A/-D} 2>/dev/null || true
+        done
+    done
+    # Clear nat PREROUTING rules (packages mode DNS redirect)
+    sudo iptables -t nat -S PREROUTING 2>/dev/null | grep -- "--comment isolab-${name}-net" | while read -r rule; do
+        sudo iptables -t nat ${rule/-A/-D} 2>/dev/null || true
+    done
+}
+
+_net_apply_rules() {
+    local name="$1"
+    local mode="$2"
+    local container_name="${CONTAINER_PREFIX}${name}"
+
+    if [ "$mode" = "open" ]; then
+        return 0  # No rules needed
+    fi
+
+    local container_ip
+    container_ip=$(_get_container_ip "$container_name")
+    if [ -z "$container_ip" ]; then
+        echo "  warning: could not determine container IP"
+        return 1
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        echo "  warning: could not set iptables rules (need sudo)"
+        echo "  container has network access — run with sudo for full isolation"
+        return 1
+    fi
+
+    local tag="isolab-${name}-net"
+
+    case "$mode" in
+        none)
+            # DROP all, allow ESTABLISHED/RELATED (for SSH return traffic)
+            sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" \
+                -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "$tag"
+            ;;
+        packages)
+            # DNS redirected to dnsmasq via NAT, only ports 80/443 allowed
+            local bridge_gw
+            bridge_gw=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
+
+            # NAT: redirect container DNS to dnsmasq on bridge gateway
+            sudo iptables -t nat -I PREROUTING \
+                -s "$container_ip" -p udp --dport 53 \
+                -j DNAT --to-destination "${bridge_gw}:5354" \
+                -m comment --comment "$tag"
+            sudo iptables -t nat -I PREROUTING \
+                -s "$container_ip" -p tcp --dport 53 \
+                -j DNAT --to-destination "${bridge_gw}:5354" \
+                -m comment --comment "$tag"
+
+            # Filter: allow established, 80, 443, DNS to bridge gw, drop rest
+            sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p tcp --dport 443 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p tcp --dport 80 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" \
+                -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "$tag"
+            ;;
+        web)
+            # HTTP/HTTPS/DNS to anywhere
+            sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p tcp --dport 443 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p tcp --dport 80 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p udp --dport 53 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" -p tcp --dport 53 -j ACCEPT \
+                -m comment --comment "$tag"
+            sudo iptables -I DOCKER-USER -s "$container_ip" \
+                -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT \
+                -m comment --comment "$tag"
+            ;;
+    esac
+}
+
+_net_switch() {
+    local name="$1"
+    local mode="$2"
+    _net_clear_rules "$name"
+    _net_apply_rules "$name" "$mode"
+    _set_mode "$name" "$mode"
+}
+
+# Map mode to display name for MOTD
+_mode_display() {
+    case "$1" in
+        none)     echo "ISOLATED" ;;
+        packages) echo "PACKAGES" ;;
+        web)      echo "WEB" ;;
+        open)     echo "OPEN" ;;
+        *)        echo "UNKNOWN" ;;
+    esac
+}
 
 # ─── Key Management ──────────────────────────────────
 
@@ -174,9 +326,11 @@ get_ssh_port() {
     docker inspect --format='{{(index (index .NetworkSettings.Ports "22/tcp") 0).HostPort}}' "${CONTAINER_PREFIX}${name}" 2>/dev/null || echo "N/A"
 }
 
+# ─── Commands ─────────────────────────────────────────
+
 cmd_create() {
     local name="$1"
-    local net_mode="${2:---net=none}"
+    local net_flag="${2:---net=none}"
     local container_name="${CONTAINER_PREFIX}${name}"
 
     if docker ps -a --format '{{.Names}}' | grep -q "^${container_name}$"; then
@@ -209,29 +363,31 @@ cmd_create() {
         port=$((port + 1))
     done
 
-    # Parse network mode
-    # Note: --network=none disables all networking including port mapping,
-    # so for "none" mode we use the default bridge and block egress via iptables
-    local docker_net_args=""
-    local net_display=""
-    case "$net_mode" in
-        --net=none)
-            docker_net_args=""
-            net_display="ISOLATED"
-            ;;
-        --net=packages)
-            docker_net_args="--network=isolab-packages"
-            net_display="PACKAGES"
-            ;;
-        --net=full)
-            docker_net_args=""
-            net_display="FULL"
-            ;;
+    # Parse network mode (all use default bridge)
+    local mode=""
+    case "$net_flag" in
+        --net=none)     mode="none" ;;
+        --net=packages) mode="packages" ;;
+        --net=web)      mode="web" ;;
+        --net=open)     mode="open" ;;
+        --net=full)     mode="open" ;;  # alias for backward compat
         *)
-            echo "error: unknown network mode. Use --net=none, --net=packages, or --net=full"
+            echo "error: unknown network mode. Use --net=none, --net=packages, --net=web, or --net=open"
             exit 1
             ;;
     esac
+
+    # Packages mode requires dnsmasq
+    if [ "$mode" = "packages" ]; then
+        if ! systemctl is-active --quiet isolab-dns 2>/dev/null; then
+            echo "error: packages mode requires isolab-dns service"
+            echo "  Run: sudo isolab setup-dns"
+            exit 1
+        fi
+    fi
+
+    local net_display
+    net_display=$(_mode_display "$mode")
 
     echo "isolab: creating '${name}'..."
     echo "  Network: ${net_display}"
@@ -248,27 +404,15 @@ cmd_create() {
         -p "${bind_ip}:${port}:22" \
         -e SSH_PUBLIC_KEY="$ssh_pub_keys" \
         -e ISOLAB_NET_MODE="$net_display" \
-        ${docker_net_args} \
         --label isolab=true \
         --label isolab.name="${name}" \
-        --label isolab.net="${net_mode}" \
+        --label isolab.net="${mode}" \
         --label isolab.created="$(date -Iseconds)" \
         "${ISOLAB_IMAGE}" > /dev/null
 
-    # For "none" mode, block all container egress via iptables
-    if [ "$net_mode" = "--net=none" ]; then
-        local container_ip
-        container_ip=$(docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${container_name}" 2>/dev/null)
-        if [ -n "$container_ip" ]; then
-            if sudo -n true 2>/dev/null; then
-                sudo iptables -I DOCKER-USER -s "$container_ip" -j DROP -m comment --comment "isolab-${name}-block"
-                sudo iptables -I DOCKER-USER -s "$container_ip" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT -m comment --comment "isolab-${name}-block"
-            else
-                echo "  warning: could not set iptables rules (need sudo)"
-                echo "  container has network access — run with sudo for full isolation"
-            fi
-        fi
-    fi
+    # Apply network rules and persist mode
+    _net_apply_rules "$name" "$mode" || true
+    _set_mode "$name" "$mode"
 
     echo "  Port:    ${port}"
     echo "  tmux:    auto-attaches on login"
@@ -294,8 +438,7 @@ cmd_list() {
         local port
         port=$(get_ssh_port "$name")
         local net
-        net=$(docker inspect --format='{{index .Config.Labels "isolab.net"}}' "$cname" 2>/dev/null || echo "?")
-        net=$(echo "$net" | sed 's/--net=//')
+        net=$(_get_mode "$name")
         local short_status
         if echo "$status" | grep -q "Up"; then
             short_status="running"
@@ -334,6 +477,8 @@ cmd_ssh() {
 cmd_stop() {
     local name="$1"
     echo "isolab: stopping '${name}'..."
+    # Clear iptables rules before stopping (IP will be released)
+    _net_clear_rules "$name"
     docker stop "${CONTAINER_PREFIX}${name}" > /dev/null
     echo "  Stopped. tmux sessions preserved — start again to resume."
 }
@@ -342,23 +487,21 @@ cmd_start() {
     local name="$1"
     echo "isolab: starting '${name}'..."
     docker start "${CONTAINER_PREFIX}${name}" > /dev/null
+    # Re-apply network rules from persisted mode (container IP may change)
+    local mode
+    mode=$(_get_mode "$name")
+    _net_apply_rules "$name" "$mode" || true
     local port
     port=$(get_ssh_port "$name")
-    echo "  Running on port ${port}."
+    echo "  Running on port ${port} (network: ${mode})."
 }
 
 cmd_rm() {
     local name="$1"
     echo "isolab: destroying '${name}'..."
-    # Clean up iptables rules for this container (non-fatal if sudo unavailable)
-    if sudo -n true 2>/dev/null; then
-        sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "isolab-${name}-block" | while read -r rule; do
-            sudo iptables ${rule/-A/-D} 2>/dev/null || true
-        done
-    else
-        echo "  warning: skipping iptables cleanup (run with sudo to clean firewall rules)"
-    fi
+    _net_clear_rules "$name"
     docker rm -f "${CONTAINER_PREFIX}${name}" > /dev/null
+    rm -f "${ISOLAB_MODES_DIR}/${name}"
     echo "  Gone."
 }
 
@@ -375,10 +518,88 @@ cmd_logs() {
 
 cmd_nuke() {
     echo "isolab: destroying ALL labs..."
+    # Clear iptables rules for all isolab containers
+    while IFS= read -r cname; do
+        [ -z "$cname" ] && continue
+        local name="${cname#${CONTAINER_PREFIX}}"
+        _net_clear_rules "$name"
+    done < <(docker ps -a --filter "label=isolab=true" --format '{{.Names}}')
     local count
     count=$(docker ps -a --filter "label=isolab=true" -q | wc -l)
     docker ps -a --filter "label=isolab=true" -q | xargs -r docker rm -f > /dev/null
+    rm -rf "$ISOLAB_MODES_DIR"
     echo "  ${count} lab(s) destroyed."
+}
+
+cmd_set_net() {
+    local name="$1"
+    local mode="$2"
+    local container_name="${CONTAINER_PREFIX}${name}"
+
+    # Validate mode
+    case "$mode" in
+        none|packages|web|open) ;;
+        full) mode="open" ;;  # alias
+        *)
+            echo "error: invalid mode '${mode}'. Use: none, packages, web, open"
+            exit 1
+            ;;
+    esac
+
+    # Check container exists and is running
+    local state
+    state=$(docker inspect --format='{{.State.Status}}' "$container_name" 2>/dev/null || echo "")
+    if [ -z "$state" ]; then
+        echo "error: lab '${name}' not found"
+        exit 1
+    fi
+    if [ "$state" != "running" ]; then
+        echo "error: lab '${name}' is not running (state: ${state})"
+        exit 1
+    fi
+
+    # Packages mode requires dnsmasq
+    if [ "$mode" = "packages" ]; then
+        if ! systemctl is-active --quiet isolab-dns 2>/dev/null; then
+            echo "error: packages mode requires isolab-dns service"
+            echo "  Run: sudo isolab setup-dns"
+            exit 1
+        fi
+    fi
+
+    local net_display
+    net_display=$(_mode_display "$mode")
+
+    echo "isolab: switching '${name}' to ${net_display} (${mode})..."
+    _net_switch "$name" "$mode"
+
+    # Update in-container MOTD display
+    docker exec "$container_name" \
+        sh -c "echo '${net_display}' > /home/sandbox/.isolab-net-mode" 2>/dev/null || true
+
+    echo "  Done."
+}
+
+cmd_setup_dns() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ ! -f "${script_dir}/scripts/setup-dns.sh" ]; then
+        echo "error: scripts/setup-dns.sh not found"
+        exit 1
+    fi
+    exec sudo bash "${script_dir}/scripts/setup-dns.sh"
+}
+
+cmd_dns_reload() {
+    if ! systemctl is-active --quiet isolab-dns 2>/dev/null; then
+        echo "error: isolab-dns service is not running"
+        echo "  Run: sudo isolab setup-dns"
+        exit 1
+    fi
+    echo "isolab: regenerating DNS allowlist and reloading..."
+    sudo /usr/local/lib/isolab/gen-dns-allowlist
+    sudo systemctl restart isolab-dns
+    echo "  Done."
 }
 
 cmd_install_proxy() {
@@ -469,7 +690,7 @@ SERVICE_EOF
 # ─── Main ────────────────────────────────────────────
 case "${1:-help}" in
     create)
-        [ -z "${2:-}" ] && echo "Usage: isolab create <name> [--net=none|packages|full]" && exit 1
+        [ -z "${2:-}" ] && echo "Usage: isolab create <name> [--net=none|packages|web|open]" && exit 1
         cmd_create "$2" "${3:---net=none}"
         ;;
     list|ls)
@@ -495,11 +716,21 @@ case "${1:-help}" in
         [ -z "${2:-}" ] && echo "Usage: isolab logs <name>" && exit 1
         cmd_logs "$2"
         ;;
+    set-net)
+        [ -z "${2:-}" ] || [ -z "${3:-}" ] && echo "Usage: isolab set-net <name> <none|packages|web|open>" && exit 1
+        cmd_set_net "$2" "$3"
+        ;;
     nuke)
         cmd_nuke
         ;;
     keys)
         cmd_keys "${2:-}" "${3:-}"
+        ;;
+    setup-dns)
+        cmd_setup_dns
+        ;;
+    dns-reload)
+        cmd_dns_reload
         ;;
     install-proxy)
         cmd_install_proxy
@@ -511,28 +742,35 @@ isolab — Disposable, sandboxed environments for LLM agent work
 Usage: isolab <command> [args]
 
 Commands:
-  create <name> [--net=none|packages|full]   Spin up a new lab
-  list                                       List all labs
-  ssh <name>                                 SSH in (auto-attaches tmux)
-  stop <name>                                Stop (tmux preserved)
-  start <name>                               Start a stopped lab
-  rm <name>                                  Destroy permanently
-  logs <name>                                View session logs
-  nuke                                       Destroy ALL labs
-  keys add <key|file>                        Add an SSH public key
-  keys list                                  List configured keys
-  keys rm <index>                            Remove a key by index
-  keys sync [name]                           Push keys to running labs
-  install-proxy                              Install SSH proxy (port 2222)
+  create <name> [--net=MODE]   Spin up a new lab
+  list                         List all labs
+  ssh <name>                   SSH in (auto-attaches tmux)
+  stop <name>                  Stop (tmux preserved)
+  start <name>                 Start a stopped lab
+  rm <name>                    Destroy permanently
+  logs <name>                  View session logs
+  set-net <name> <mode>        Switch network mode (no restart)
+  nuke                         Destroy ALL labs
+  keys add <key|file>          Add an SSH public key
+  keys list                    List configured keys
+  keys rm <index>              Remove a key by index
+  keys sync [name]             Push keys to running labs
+  setup-dns                    Install dnsmasq for packages mode
+  dns-reload                   Regenerate DNS allowlist and reload
+  install-proxy                Install SSH proxy (port 2222)
 
 Network modes:
   --net=none       No network (default). Fully isolated.
-  --net=packages   Outbound to package registries only.
-  --net=full       Unrestricted network access.
+  --net=packages   DNS-filtered allowlist + ports 80/443 only.
+  --net=web        HTTP/HTTPS/DNS to anywhere.
+  --net=open       Unrestricted network access.
+  --net=full       Alias for --net=open.
 
 Examples:
   isolab create myproject
-  isolab create webdev --net=packages
+  isolab create webdev --net=web
+  isolab create builder --net=packages
+  isolab set-net myproject web
   isolab ssh myproject
   isolab keys add ~/.ssh/id_ed25519.pub
   isolab keys sync
