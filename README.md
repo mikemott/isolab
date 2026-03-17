@@ -171,6 +171,38 @@ sudo systemctl stop isolab-dashboard     # Stop
 
 **Security note**: The dashboard has no authentication. Only expose it via Tailscale or localhost — never directly to the internet.
 
+### MCP Server (Claude Code Integration)
+
+The isolab MCP server lets you manage sandboxes directly from Claude Code using natural language.
+
+**Setup:**
+
+1. Install dependencies:
+   ```bash
+   cd mcp
+   pip install -r requirements.txt
+   ```
+
+2. Add to Claude Code settings (`~/.claude/settings.json`):
+   ```json
+   {
+     "mcpServers": {
+       "isolab": {
+         "command": "python3",
+         "args": ["/path/to/isolab/mcp/server.py"]
+       }
+     }
+   }
+   ```
+
+3. Use natural language in Claude Code:
+   - "Create a sandbox called 'test' with package network access"
+   - "List all my sandboxes"
+   - "Execute 'python --version' in the test sandbox"
+   - "Show me the logs from test"
+
+See [mcp/README.md](mcp/README.md) for full documentation.
+
 ### Tips
 
 - **Default to `--net=none`** and only escalate when you need to install packages
@@ -198,6 +230,10 @@ isolab/
 │   └── disk-watchdog.sh        # Capacity warning cron
 ├── dashboard/
 │   └── app.py                  # Flask web UI
+├── mcp/
+│   ├── server.py               # MCP server for Claude Code integration
+│   ├── requirements.txt        # Python dependencies
+│   └── README.md               # MCP setup instructions
 ├── scripts/
 │   ├── setup-networks.sh       # Restricted Docker network
 │   ├── isolab-authkeys         # SSH proxy key lookup
