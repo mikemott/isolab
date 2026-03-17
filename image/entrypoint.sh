@@ -13,6 +13,9 @@ echo "${ISOLAB_NET_MODE:-ISOLATED}" > /home/sandbox/.isolab-net-mode
 echo "${HOSTNAME:-isolab}" > /home/sandbox/.isolab-name
 chown sandbox:sandbox /home/sandbox/.isolab-net-mode /home/sandbox/.isolab-name
 
+# ── Forge setup (if credentials provided) ─────────────
+forge-setup || true
+
 # ── Start cron (disk watchdog) ─────────────────────────
 cron
 
