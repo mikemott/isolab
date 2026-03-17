@@ -37,6 +37,7 @@ RUN useradd -m -s /bin/bash -G sudo sandbox && \
 RUN mkdir /var/run/sshd && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    sed -i 's/session    required     pam_loginuid.so/session    optional     pam_loginuid.so/' /etc/pam.d/sshd && \
     echo "AllowUsers sandbox" >> /etc/ssh/sshd_config
 
 RUN mkdir -p /home/sandbox/.ssh && \
@@ -66,6 +67,20 @@ COPY disk-watchdog.sh /usr/local/bin/disk-watchdog
 RUN chmod +x /usr/local/bin/disk-watchdog && \
     echo "*/10 * * * * sandbox /usr/local/bin/disk-watchdog" > /etc/cron.d/disk-watchdog && \
     chmod 0644 /etc/cron.d/disk-watchdog
+
+# ── Claude Code ──────────────────────────────────────
+RUN npm install -g @anthropic-ai/claude-code
+
+# ── Forge (agent context system) ─────────────────────
+COPY forge/ /opt/forge/
+RUN cd /opt/forge && \
+    npm ci && \
+    npx tsc && \
+    npm prune --omit=dev && \
+    chown -R sandbox:sandbox /opt/forge
+
+COPY forge-setup.sh /usr/local/bin/forge-setup
+RUN chmod +x /usr/local/bin/forge-setup
 
 # ── Entrypoint ─────────────────────────────────────────
 COPY entrypoint.sh /entrypoint.sh

@@ -28,6 +28,7 @@ ISOLAB_MODES_DIR="${ISOLAB_CONFIG_DIR}/modes"
 ISOLAB_IMAGE="${ISOLAB_IMAGE:-isolab:latest}"
 CONTAINER_PREFIX="iso-"
 SSH_BASE_PORT=2200
+ISOLAB_FORGE_ENV="${ISOLAB_CONFIG_DIR}/forge.env"
 
 # ─── Network Engine ──────────────────────────────────
 
@@ -71,12 +72,12 @@ _net_clear_rules() {
     # Clear filter rules (new tag: isolab-${name}-net, legacy: isolab-${name}-block)
     local tag
     for tag in "isolab-${name}-net" "isolab-${name}-block"; do
-        sudo iptables -S DOCKER-USER 2>/dev/null | grep -- "--comment ${tag}" | while read -r rule; do
+        sudo iptables -S DOCKER-USER 2>/dev/null | { grep -- "--comment ${tag}" || true; } | while read -r rule; do
             sudo iptables ${rule/-A/-D} 2>/dev/null || true
         done
     done
     # Clear nat PREROUTING rules (packages mode DNS redirect)
-    sudo iptables -t nat -S PREROUTING 2>/dev/null | grep -- "--comment isolab-${name}-net" | while read -r rule; do
+    sudo iptables -t nat -S PREROUTING 2>/dev/null | { grep -- "--comment isolab-${name}-net" || true; } | while read -r rule; do
         sudo iptables -t nat ${rule/-A/-D} 2>/dev/null || true
     done
 }
@@ -400,15 +401,35 @@ cmd_create() {
         echo "  Binding: ${bind_ip} (Tailscale)"
     fi
 
+    # Forge env vars (if forge.env exists)
+    local forge_env_args=()
+    if [ -f "${ISOLAB_FORGE_ENV}" ]; then
+        forge_env_args+=(--env-file "${ISOLAB_FORGE_ENV}")
+        forge_env_args+=(-e "ISOLAB_VM_ID=isolab-${name}")
+    fi
+
     docker run -d \
         --name "${container_name}" \
-        --runtime=runsc \
+        --runtime=runc \
         --hostname "${name}" \
+        --dns=1.1.1.1 --dns=8.8.8.8 \
         --memory=4g \
         --cpus=2 \
+        --cap-drop=ALL \
+        --cap-add=CHOWN \
+        --cap-add=SETUID \
+        --cap-add=SETGID \
+        --cap-add=NET_BIND_SERVICE \
+        --cap-add=SYS_CHROOT \
+        --cap-add=DAC_OVERRIDE \
+        --cap-add=FOWNER \
+        --cap-add=KILL \
+        --cap-add=AUDIT_WRITE \
+        --pids-limit=512 \
         -p "${bind_ip}:${port}:22" \
         -e SSH_PUBLIC_KEY="$ssh_pub_keys" \
         -e ISOLAB_NET_MODE="$net_display" \
+        ${forge_env_args[@]+"${forge_env_args[@]}"} \
         --label isolab=true \
         --label isolab.name="${name}" \
         --label isolab.net="${mode}" \
@@ -642,7 +663,6 @@ HostKey /etc/ssh/ssh_host_rsa_key
 SyslogFacility AUTH
 LogLevel INFO
 PermitRootLogin no
-AllowUsers ${user}
 MaxAuthTries 3
 MaxSessions 5
 LoginGraceTime 30
@@ -693,6 +713,12 @@ SERVICE_EOF
 }
 
 # ─── Main ────────────────────────────────────────────
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/tui.sh"
+    tui_main
+    exit 0
+fi
+
 case "${1:-help}" in
     create)
         [ -z "${2:-}" ] && echo "Usage: isolab create <name> [--net=none|packages|web|open]" && exit 1
