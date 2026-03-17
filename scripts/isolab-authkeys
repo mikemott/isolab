@@ -1,0 +1,24 @@
+#!/bin/bash
+#
+# isolab-authkeys — AuthorizedKeysCommand for isolab proxy sshd
+#
+# Called by sshd with: isolab-authkeys <username> <fingerprint> <key-type> <key-blob>
+# Outputs authorized_keys lines with command= forcing isolab-proxy.
+#
+
+ISOLAB_KEYS="${ISOLAB_CONFIG_DIR:-$HOME/.config/isolab}/authorized_keys"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROXY="${SCRIPT_DIR}/isolab-proxy"
+
+if [ ! -f "$ISOLAB_KEYS" ]; then
+    exit 0
+fi
+
+# For each key in isolab's config, output it with a forced command
+# that passes the key's fingerprint so the proxy knows who connected.
+while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    fp=$(echo "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+    [ -z "$fp" ] && continue
+    echo "command=\"${PROXY} ${fp}\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ${line}"
+done < "$ISOLAB_KEYS"

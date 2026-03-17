@@ -1,0 +1,13 @@
+[Unit]
+Description=Isolab SSH Proxy (auto-provision containers on connect)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sshd -D -f /home/mike/isolab/scripts/isolab-sshd.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

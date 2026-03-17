@@ -20,10 +20,15 @@ case "$NET_MODE" in
         ;;
     PACKAGES)
         NET_COLOR="$AMBER"
-        NET_ICON="◎ RESTRICTED"
-        NET_DESC="Outbound to package registries only (ports 80/443)."
+        NET_ICON="◎ FILTERED"
+        NET_DESC="DNS-filtered allowlist + ports 80/443 only."
         ;;
-    FULL)
+    WEB)
+        NET_COLOR="$CYAN"
+        NET_ICON="◎ RESTRICTED"
+        NET_DESC="HTTP/HTTPS/DNS only. No SSH, no raw sockets."
+        ;;
+    OPEN)
         NET_COLOR="$CYAN"
         NET_ICON="○ OPEN"
         NET_DESC="Full network access. Be cautious."
@@ -40,7 +45,7 @@ MEM_USED=$(free -h 2>/dev/null | awk '/Mem:/{print $3}' || echo "?")
 DISK_USED=$(df -h / 2>/dev/null | awk 'NR==2{print $3"/"$2" ("$5")"}' || echo "?")
 
 echo ""
-echo -e "${GREEN}${BOLD}  ⬡ ISOLAB: ${LAB_NAME}${NC}"
+echo -e "${GREEN}${BOLD}  ⚗ ISOLAB: ${LAB_NAME}${NC}"
 echo -e "${DIM}  ──────────────────────────────────────${NC}"
 echo -e "  ${DIM}Network :${NC} ${NET_COLOR}${BOLD}${NET_ICON}${NC}"
 echo -e "  ${DIM}          ${NET_DESC}${NC}"
